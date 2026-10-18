@@ -116,6 +116,38 @@ def payment_date_violation(text: str, payment_date: str | None) -> str | None:
     return None
 
 
+def requested_documents(question: str) -> dict[str, list[str]]:
+    """Resolve explicit CRA publication codes from this user turn, not model text."""
+    catalog = json.loads((ROOT / "knowledge/sources/catalog.json").read_text(encoding="utf-8"))
+    identifiers = [item["document_id"].lower() for item in catalog["documents"]]
+    tokens = re.findall(r"\b(?:t\d{4}(?:cpp2?|einoqc)?|rc\d{4}|td1(?:on)?)(?:-[a-z0-9]+)*\b", question.lower())
+    return {token: [identifier for identifier in identifiers
+                    if identifier == token or ("-" not in token and identifier.split("-")[0] == token)]
+            for token in tokens}
+
+
+def document_violation(requested: dict[str, list[str]], sources: list[dict]) -> str | None:
+    if not requested:
+        return None
+    cited = {source.get("document_id") for source in sources}
+    allowed = {identifier for identifiers in requested.values() for identifier in identifiers}
+    if not cited.issubset(allowed) or any(not cited.intersection(ids) for ids in requested.values()):
+        return "Use evidence from every explicitly requested publication only; do not substitute another guide. If unavailable, explain the gap with unsupported status"
+    return None
+
+
+def payroll_amount_violation(text: str) -> str | None:
+    """Block numeric payroll outputs while the calculation capability is absent."""
+    amount = r"(?:\$\s*\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*(?:CAD|dollars)\b)"
+    label = r"(?:gross\s+pay|net\s+pay|take.home\s+pay|pay\s+per\s+(?:period|cheque|check)|(?:CPP|EI|tax|payroll)\s+(?:deductions?|withholdings?)|deduction\s+amounts?)"
+    if re.search(label + r"[^.!?\n]{0,65}" + amount, text, re.IGNORECASE) or re.search(
+        amount + r"\s*(?:gross|net)?\s*(?:per|each|every|/)\s*(?:pay\s*period|paycheque|paycheck|biweekly|bi-weekly|week|month)\b",
+        text, re.IGNORECASE,
+    ) or re.search(r"\d[\d,.]*\s*(?:/|÷|divided by)\s*(?:12|24|26|52)\s*=", text, re.IGNORECASE):
+        return "Payroll amounts and estimates require a calculation tool, which is unavailable. Retain the supplied annual salary without deriving per-period pay or deductions"
+    return None
+
+
 def applicability_violation(text: str, sources: list[dict], payment_date: str | None) -> str | None:
     """Catch observed definitive application claims when source dates are unresolved."""
     if payment_date is None or not any(
@@ -127,7 +159,10 @@ def applicability_violation(text: str, sources: list[dict], payment_date: str | 
             r"\b(?:apply|applies|applicable|valid|in force|effective)\b.{0,90}"
             r"\b(?:your|this|the) (?:intended )?(?:payment|pay) date\b|"
             r"\b(?:your|this|the) (?:intended )?(?:payment|pay) date\b.{0,90}"
-            r"\b(?:apply|applies|applicable|valid|in force|effective)\b",
+            r"\b(?:apply|applies|applicable|valid|in force|effective)\b|"
+            r"\b(?:would|should|will|does|must)\s+(?:(?:ordinarily|normally|generally|still)\s+)?(?:govern|apply)\b|"
+            r"\b(?:governs|governing|is applicable|is valid|remains effective)\b|"
+            r"\b(?:applies|valid|effective)\s+(?:on|for|through)\s+\d{4}-\d{2}-\d{2}\b",
             sentence, re.IGNORECASE,
         )
         if claim:
@@ -212,6 +247,7 @@ class AgentState(TypedDict):
     correction_attempts: int
     payment_date: str | None
     payment_date_status: str
+    requested_documents: dict[str, list[str]]
     evidence: dict[str, dict[str, Any]]
     trace: list[dict[str, Any]]
     outcome: dict[str, Any]
@@ -229,6 +265,13 @@ Runtime capability inventory (true means available):
 The skill describes the eventual product; the runtime inventory determines what
 you can do NOW. Missing user details cannot enable a disconnected capability.
 Do not invent access or perform payroll arithmetic yourself.
+Do not provide numeric gross pay per period, estimated payroll deductions, or
+net pay, even as an illustration or alongside a disclaimer. Repeating the user's
+annual salary is allowed; deriving new payroll amounts requires a calculation tool.
+When the user explicitly names a CRA publication, search and cite that publication.
+Never silently substitute a different guide. If it is unavailable, say so.
+When effective dates are incomplete, do not say an edition would ordinarily govern
+or should apply. Explain the edition's content and that applicability is unconfirmed.
 
 STATUS AND CAPABILITY RULES:
 - Employee-specific payday, employee lookups, company schedules and compensation
@@ -301,7 +344,9 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
 
     def model_node(state: AgentState) -> dict:
         date_context = {"payment_date": state["payment_date"], "status": state["payment_date_status"]}
-        messages = [SystemMessage(content=prompt + "\n\nUSER PAYMENT DATE CONTEXT: " + json.dumps(date_context)
+        messages = [SystemMessage(content=prompt + "\n\nREQUESTED PUBLICATIONS: " + json.dumps(state["requested_documents"])
+            + "\nUse only these document IDs when publications are requested. An empty ID list means unavailable; do not substitute."
+            + "\n\nUSER PAYMENT DATE CONTEXT: " + json.dumps(date_context)
             + "\nThis context is derived only from user messages, never from retrieved documents. "
               "If payment_date is null, ask for it before date-sensitive intake or table selection. "
               "For general definitions, explain evidence limitations without requiring an irrelevant date. "
@@ -344,6 +389,13 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                 searches += 1
                 try:
                     args = SearchArguments.model_validate(call["args"]).model_dump()
+                    requested = state["requested_documents"]
+                    allowed = {identifier for ids in requested.values() for identifier in ids}
+                    if requested:
+                        if args["document_id"] is None and len(allowed) == 1:
+                            args["document_id"] = next(iter(allowed))
+                        if any(not ids for ids in requested.values()) or args["document_id"] not in allowed:
+                            raise ValueError("Search must select an available requested publication")
                     if state["payment_date"] is None and (
                         args["document_type"] == "deduction_table" or args["pay_periods_per_year"] is not None
                     ):
@@ -353,6 +405,8 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                         result = search_tool.invoke(args)
                     results = []
                     for item in result["results"]:
+                        if requested and item.get("document_id") not in allowed:
+                            continue
                         if not all(key in item for key in ("chunk_id", "content", "source_url", "title", "pdf_page_number", "review_status")):
                             raise ValueError("Missing citation fields")
                         source_id = next((key for key, value in evidence.items()
@@ -363,6 +417,8 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                         results.append({"source_id": source_id, **item,
                             "payment_applicability": source_applicability(item, state["payment_date"])})
                     output = {**result, "results": results}
+                    if not results and result["status"] == "evidence_found":
+                        output["status"] = "no_evidence"
                 except Exception:
                     # Raw API errors can contain request details; never expose them.
                     output = {"status": "tool_error", "error": "Search failed or arguments were invalid. Refine inputs or explain the limitation."}
@@ -416,6 +472,13 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
             violation = capability_violation(status, text)
             if violation:
                 raise ValueError(violation)
+            violation = payroll_amount_violation(text)
+            if violation:
+                raise ValueError(violation)
+            if status == "answer":
+                violation = document_violation(state["requested_documents"], [state["evidence"][key] for key in citations])
+                if violation:
+                    raise ValueError(violation)
             violation = payment_date_violation(text, state["payment_date"])
             if violation:
                 raise ValueError(violation)
@@ -530,6 +593,7 @@ def run_turn(graph: Any, question: str, history: list[BaseMessage] | None = None
         "messages": [*recent, HumanMessage(content=question)],
         "model_calls": 0, "searches": 0, "correction_attempts": 0,
         "payment_date": context["date"], "payment_date_status": context["status"],
+        "requested_documents": requested_documents(question),
         "evidence": {}, "trace": [], "outcome": {},
     }, config={"recursion_limit": 16})
 

@@ -16,7 +16,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from payroll_agent import MAX_MODEL_CALLS, MAX_SEARCHES, SUBMIT_NAME, TOOL_NAME, applicability_violation, build_agent, create_model, payment_context, render_answer, source_applicability, submission_tool, run_turn
+from payroll_agent import MAX_MODEL_CALLS, MAX_SEARCHES, SUBMIT_NAME, TOOL_NAME, applicability_violation, build_agent, create_model, document_violation, payment_context, payroll_amount_violation, render_answer, requested_documents, source_applicability, submission_tool, run_turn
 
 
 def final(status, text, citations=None):
@@ -467,6 +467,103 @@ class PayrollAgentTests(unittest.TestCase):
         self.assertEqual(state["outcome"]["status"], "unsupported")
         self.assertEqual(state["trace"][-1]["status"], "rejected")
 
+    def test_explicit_publication_is_resolved_without_treating_t4_boxes_as_guides(self):
+        self.assertEqual(requested_documents("Use the T4001 guide."), {"t4001": ["t4001-25e"]})
+        self.assertEqual(requested_documents("Use T4001-25e, not an assumed edition."), {"t4001-25e": ["t4001-25e"]})
+        self.assertEqual(requested_documents("What are T4 boxes 14 and 22?"), {})
+        self.assertEqual(requested_documents("Use T9999."), {"t9999": []})
+
+    def test_requested_guide_is_enforced_before_retrieval(self):
+        saved = evidence()
+        saved["results"][0]["document_id"] = "t4001-25e"
+        retriever = Mock(return_value=saved)
+        model = FakeModel([call(document_id="t4127-01-26e"), call(2),
+                           final("answer", "The requested guide describes deductions [S1].", ["S1"])])
+        state = run_turn(build_agent(model, retriever), "What does T4001 say?")
+        self.assertEqual(retriever.call_count, 1)
+        self.assertEqual(retriever.call_args.kwargs["document_id"], "t4001-25e")
+        self.assertEqual(state["trace"][1]["status"], "tool_error")
+        self.assertEqual(state["outcome"]["status"], "answer")
+
+    def test_unavailable_requested_guide_never_calls_retriever(self):
+        retriever = Mock()
+        model = FakeModel([call(), final("unsupported", "The requested T9999 publication is not available in the catalog.")])
+        state = run_turn(build_agent(model, retriever), "Explain T9999.")
+        retriever.assert_not_called()
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+
+    def test_retriever_cannot_leak_substitute_publication_into_evidence(self):
+        saved = evidence()
+        saved["results"][0]["document_id"] = "t4127-01-26e"
+        invalid = final("answer", "Use another guide [S1].", ["S1"])
+        state = run_turn(build_agent(FakeModel([call(), invalid,
+            final("unsupported", "No suitable evidence from T4001 was retrieved.")]), Mock(return_value=saved)), "Explain T4001.")
+        self.assertEqual(state["evidence"], {})
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+        self.assertEqual(state["trace"][1]["status"], "no_evidence")
+
+    def test_multiple_requested_publications_require_evidence_from_each(self):
+        requested = requested_documents("Compare T4001 and T4127")
+        first = {"document_id": "t4001-25e"}
+        second = {"document_id": "t4127-jul-26e"}
+        self.assertIsNotNone(document_violation(requested, [first]))
+        self.assertIsNotNone(document_violation(requested, [{"document_id": "rc4120-25e"}]))
+        self.assertIsNone(document_violation(requested, [first, second]))
+
+    def test_request_for_specific_edition_does_not_allow_another_edition(self):
+        retriever = Mock()
+        model = FakeModel([call(document_id="t4127-jul-26e"),
+                           final("unsupported", "I could not retrieve the requested January edition.")])
+        state = run_turn(build_agent(model, retriever), "Use T4127-01-26e.")
+        retriever.assert_not_called()
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+
+    def test_payroll_estimates_are_rejected_even_with_a_disclaimer(self):
+        for estimate in ("Gross pay per period: approximately $1,923.08.",
+                         "You receive $1,923.08 per pay period.",
+                         "Your CPP deduction is approximately $100.00.",
+                         "Your tax deductions: 200 CAD.",
+                         "$50,000 / 26 = $1,923.08."):
+            with self.subTest(estimate=estimate):
+                invalid = final("clarification", estimate + " Calculation tools are unavailable. What TD1 details do you have?")
+                corrected = final("clarification", "Your annual salary is $50,000. Payroll calculation is unavailable. What TD1 details do you have?")
+                state = run_turn(build_agent(FakeModel([invalid, corrected]), Mock()), "Annual salary $50,000, biweekly.")
+                self.assertEqual(state["correction_attempts"], 1)
+                self.assertIn("Payroll amounts and estimates", state["trace"][1]["reason"])
+                self.assertEqual(state["trace"][-1]["status"], "accepted")
+
+    def test_salary_confirmation_and_general_explanation_are_allowed(self):
+        for text in ("Annual salary: $50,000. Frequency: biweekly (26 periods).",
+                     "The user supplied a $50,000 annual salary. Calculation is unavailable.",
+                     "Gross pay is the amount before deductions. No estimate is available."):
+            self.assertIsNone(payroll_amount_violation(text))
+
+    def test_payroll_estimate_cannot_bypass_correction_limit(self):
+        invalid = final("clarification", "Gross pay per period: $1,923.08. What TD1 details?")
+        state = run_turn(build_agent(FakeModel([invalid, invalid]), Mock()), "Biweekly $50,000 salary.")
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+        self.assertEqual(state["trace"][-1]["status"], "rejected")
+
+    def test_ordinarily_govern_claim_is_rejected_despite_appended_uncertainty(self):
+        for claim in ("For your payment date of 2026-11-13, the January edition would ordinarily govern, but the end date is unknown.",
+                      "This edition should apply, although applicability remains unresolved.",
+                      "The January edition governs your payment.",
+                      "This guidance is valid for 2026-11-13."):
+            with self.subTest(claim=claim):
+                invalid = final("answer", claim, ["S1"])
+                corrected = final("answer", "The edition describes deductions; applicability cannot be confirmed because dates are incomplete [S1].", ["S1"])
+                state = run_turn(build_agent(FakeModel([call(), invalid, corrected]), Mock(return_value=evidence())),
+                                 "Payment date: 2026-11-13. Explain this guide.")
+                self.assertEqual(state["correction_attempts"], 1)
+                self.assertEqual(state["trace"][-1]["status"], "accepted")
+
+    def test_qualified_or_confirmed_date_explanations_remain_allowed(self):
+        for text in ("I cannot confirm whether this edition would ordinarily govern.",
+                     "Applicability cannot be confirmed; the guide describes deductions."):
+            self.assertIsNone(applicability_violation(text, evidence()["results"], "2026-11-13"))
+        known = [{"effective_from": "2026-01-01", "effective_to": "2026-12-31"}]
+        self.assertIsNone(applicability_violation("This edition applies to your payment date.", known, "2026-11-13"))
+
 
 @unittest.skipUnless(os.getenv("RUN_LIVE_AGENT_TESTS") == "1",
                      "Paid API scenario disabled; requires explicit RUN_LIVE_AGENT_TESTS=1")
@@ -490,6 +587,8 @@ class LivePayrollAgentTests(unittest.TestCase):
                          "A fallback is not a successful model response")
         self.assertLessEqual(state["model_calls"], MAX_MODEL_CALLS)
         self.assertLessEqual(state["searches"], MAX_SEARCHES)
+        self.assertIsNone(payroll_amount_violation(outcome["text"]),
+                          "A disclaimer cannot excuse a payroll estimate without a calculation tool")
         return state
 
     def test_salary_clarification_and_followup_context(self):
@@ -559,6 +658,8 @@ class LivePayrollAgentTests(unittest.TestCase):
         self.assertEqual(third["payment_date"], "2026-11-13")
         self.assertEqual(third["outcome"]["status"], "answer")
         self.assertTrue(third["outcome"]["sources"])
+        self.assertIsNone(document_violation(requested_documents("T4001"), third["outcome"]["sources"]),
+                          "The requested T4001 guide cannot be replaced by T4127")
         self.assertTrue(any(source["payment_applicability"] == "effective_dates_incomplete" for source in third["outcome"]["sources"]))
         self.assertIn("applicability remains unresolved", third["outcome"]["text"])
         self.assertIsNone(applicability_violation(third["outcome"]["text"], third["outcome"]["sources"], third["payment_date"]),
