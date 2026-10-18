@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Any, Callable, Literal, TypedDict
 
 from dotenv import load_dotenv
@@ -69,6 +70,122 @@ def payment_context(messages: list[BaseMessage]) -> dict[str, Any]:
     return context
 
 
+def requested_confirmations(messages: list[BaseMessage], question: str, payment_date: str | None) -> dict[str, str]:
+    """Capture supported salary/frequency forms from user text for explicit confirmations."""
+    if not re.search(r"\bconfirm\b", question, re.IGNORECASE):
+        return {}
+    salary, frequency = None, None
+    frequencies = {"biweekly": r"\bbi[ -]?weekly\b", "semimonthly": r"\bsemi[ -]?monthly\b",
+                   "weekly": r"(?<!bi-)\bweekly\b", "monthly": r"(?<!semi-)\bmonthly\b"}
+    for message in messages:
+        if not isinstance(message, HumanMessage) or not isinstance(message.content, str):
+            continue
+        text = message.content
+        if re.search(r"\b(?:annual|salary)\b", text, re.IGNORECASE):
+            amounts = re.findall(r"\$\s*(\d[\d,]*(?:\.\d+)?)(k)?\b", text, re.IGNORECASE)
+            values = {Decimal(value.replace(',', '')) * (1000 if suffix else 1) for value, suffix in amounts}
+            if values:
+                salary = format(next(iter(values)).normalize(), 'f') if len(values) == 1 else None
+            if re.search(r"\b(?:clear|reset)\s+(?:the\s+)?(?:annual\s+)?salary\b", text, re.IGNORECASE):
+                salary = None
+        # Remove compound frequencies before detecting standalone weekly/monthly.
+        compact = re.sub(r"\bbi\s+weekly\b", "biweekly", text, flags=re.IGNORECASE)
+        compact = re.sub(r"\bsemi\s+monthly\b", "semimonthly", compact, flags=re.IGNORECASE)
+        found = {name for name, pattern in frequencies.items() if re.search(pattern, compact, re.IGNORECASE)}
+        if found:
+            frequency = next(iter(found)) if len(found) == 1 else None
+    all_fields = bool(re.search(r"\b(?:details|context|everything)\b", question, re.IGNORECASE))
+    required = {}
+    for name, value, requested in (("annual_salary", salary, r"\bsalary\b"),
+                                   ("payment_date", payment_date, r"\bdate\b"),
+                                   ("pay_frequency", frequency, r"\bfrequency\b")):
+        if value and (all_fields or re.search(requested, question, re.IGNORECASE)):
+            required[name] = value
+    return required
+
+
+def confirmation_violation(text: str, required: dict[str, str]) -> str | None:
+    missing = []
+    for name, value in required.items():
+        if name == "annual_salary":
+            amounts = re.findall(r"(?<![\d-])(\d[\d,]*(?:\.\d+)?)(k)?\b", text, re.IGNORECASE)
+            present = any(Decimal(amount.replace(',', '')) * (1000 if suffix else 1) == Decimal(value)
+                          for amount, suffix in amounts)
+        elif name == "pay_frequency":
+            present = value in re.sub(r"[\s-]", "", text.lower())
+        else:
+            present = value in text
+        if not present:
+            missing.append(f"{name}={value}")
+    if missing:
+        return "Preserve every requested user confirmation in the final response: " + ", ".join(missing)
+    return None
+
+
+def review_metadata_violation(text: str) -> str | None:
+    """Catch observed attribution of project review flags to the source publisher."""
+    for sentence in re.split(r"[.!?\n]", text):
+        claim = re.search(r"\b(?:pending|awaiting|under)\s+(?:CRA|Canada Revenue Agency)\s+review\b|"
+                          r"\b(?:CRA|Canada Revenue Agency)\s+(?:has\s+)?(?:flagged|marked)\b.{0,100}\breview\b|"
+                          r"\breview\s+(?:status|flag)\b.{0,60}\b(?:from|by)\s+(?:the\s+)?CRA\b", sentence, re.IGNORECASE)
+        if claim and not re.search(r"\b(?:not|never|does not mean|do not mean)\s*$", sentence[:claim.start()], re.IGNORECASE):
+            return "Review flags belong to this project's internal ingestion/content review, not the CRA. Do not describe pending review or needs_update_review as publisher review"
+    return None
+
+
+def intake_route(question: str, history: list[BaseMessage]) -> str | None:
+    """Route supported intake forms; document explanations stay with retrieval."""
+    if re.search(r"\b(?:next payday|next pay date|when (?:will|do) .{0,35}(?:get paid|receive .{0,12}pay))\b", question, re.IGNORECASE):
+        return "payday"
+    if re.search(r"\b(?:how|explain|describe)\b.{0,100}\b(?:calculate|calculated|calculation|compute)\b", question, re.IGNORECASE):
+        return None
+    if re.search(r"\b(?:calculate|compute|estimate)\b.{0,65}\b(?:deductions?|net pay|gross pay|take.home|paycheck|paycheque)\b|"
+                 r"\b(?:my|employee's|the employee's)\s+(?:net pay|take.home pay)\b", question, re.IGNORECASE):
+        return "calculation"
+    if re.search(r"\b(?:guide|policy|rules?|explain|document|boxes|bonus|bonuses|T4|T\d{4}|RC\d{4})\b", question, re.IGNORECASE):
+        return None
+    prior_salary_intake = any(isinstance(message, HumanMessage) and isinstance(message.content, str)
+                             and re.search(r"\bsalary\b", message.content, re.IGNORECASE) for message in history)
+    salary_request = re.search(r"\bsalary\b", question, re.IGNORECASE) and re.search(
+        r"\$|\bdeductions?\b|\bconfirm\b|\b(?:annual|yearly)\b", question, re.IGNORECASE)
+    followup = prior_salary_intake and re.search(
+        r"\b(?:confirm|bi[ -]?weekly|semi[ -]?monthly|weekly|monthly|payment date|pay date|payroll date)\b|^\d{4}-\d{2}-\d{2}[.!]?$",
+        question, re.IGNORECASE,
+    )
+    return "salary" if salary_request or followup else None
+
+
+def reporting_year_violation(text: str, sources: list[dict]) -> str | None:
+    """Require explicit passage evidence for observed publication-year coverage claims."""
+    for sentence in re.split(r"[.!?\n]", text):
+        if not re.search(r"\b(?:edition|guide|publication|guidance)\b", sentence, re.IGNORECASE):
+            continue
+        if not re.search(r"\b(?:applies to|covers|effective for|governs)\b", sentence, re.IGNORECASE):
+            continue
+        if re.search(r"\b(?:cannot confirm|does not (?:confirm|prove)|unconfirmed|unknown)\b", sentence, re.IGNORECASE):
+            continue
+        years = re.findall(r"\b((?:19|20)\d{2})\s+(?:calendar|tax|reporting) year\b|"
+                           r"\b(?:calendar|tax|reporting) year\s+((?:19|20)\d{2})\b", sentence, re.IGNORECASE)
+        for before, after in years:
+            year = before or after
+            explicit = rf"\bfor\s+(?:the\s+)?(?:{year}\s+(?:calendar|tax|reporting) year|(?:calendar|tax|reporting) year\s+{year})\b"
+            if not any(re.search(explicit, source.get("content", ""), re.IGNORECASE) for source in sources):
+                return "Publication reporting-year coverage requires an explicit supporting passage from cited evidence. Do not infer coverage from edition year; omit the coverage claim when evidence is missing"
+    return None
+
+
+def unbacked_amount_violation(text: str, intake_context: dict[str, str]) -> str | None:
+    """No new currency amounts without a calculator; supplied salary may be repeated."""
+    amounts = re.findall(r"\$\s*(\d[\d,]*(?:\.\d+)?)(k)?\b|"
+                         r"\b(\d[\d,]*(?:\.\d+)?)\s*(?:CAD|dollars)\b", text, re.IGNORECASE)
+    allowed = Decimal(intake_context["annual_salary"]) if "annual_salary" in intake_context else None
+    for dollars, suffix, trailing in amounts:
+        value = Decimal((dollars or trailing).replace(',', '')) * (1000 if suffix else 1)
+        if value != allowed:
+            return "New currency amounts require a calculation tool, which is unavailable. Confirm only the supplied annual salary; explain document guidance without monetary figures"
+    return None
+
+
 def source_applicability(source: dict, payment_date: str | None) -> str:
     """Check known date bounds, preserving uncertainty when either is missing."""
     try:
@@ -116,6 +233,42 @@ def payment_date_violation(text: str, payment_date: str | None) -> str | None:
     return None
 
 
+def year_selection_violation(text: str, payment_date: str | None) -> str | None:
+    """Catch observed tax-year selection, while allowing edition descriptions and examples."""
+    if payment_date is not None:
+        return None
+    # An illustrative ISO date is not a selected tax year.
+    text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "[DATE]", text)
+    year = r"(?:19|20)\d{2}"
+    guidance = r"(?:deduction|tax|payroll)\s+(?:tables?|rates?|guidance|rules?|policy)"
+    selection = (
+        r"\b(?:applicable|correct|appropriate|use|using|retrieve|search|explain|select)\b"
+        r"[^.!?\n]{0,100}\b" + year + r"\b[^.!?\n]{0,65}\b" + guidance + r"\b|"
+        r"\b" + year + r"\b[^.!?\n]{0,65}\b" + guidance
+        + r"\b[^.!?\n]{0,50}\b(?:apply to you|for your pay|will be used)\b|"
+        r"\b(?:year.to.date|YTD|withheld|so far)\b[^.!?\n]{0,90}\b" + year + r"\b"
+    )
+    if re.search(selection, text, re.IGNORECASE):
+        return "Payment date is missing; do not select a tax year, promise a year's applicable tables, or request year-specific YTD amounts. Ask for YYYY-MM-DD first; a named edition can be described without asserting applicability"
+    return None
+
+
+def calculation_limit_disclosed(messages: list[BaseMessage]) -> bool:
+    """Recognize an explicit calculation limitation in completed assistant history."""
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.tool_calls or not isinstance(message.content, str):
+            continue
+        for sentence in re.split(r"[.!?\n]", message.content):
+            if re.search(
+                r"\b(?:payroll )?calculation(?: tools?)?\s+(?:is|are)\s+(?:not (?:yet )?(?:implemented|available|supported|connected|enabled)|unavailable)\b|"
+                r"\b(?:cannot|can't)\s+(?:calculate|compute)\s+(?:exact )?(?:payroll deductions|deduction amounts|net pay)\b|"
+                r"\b(?:does not (?:yet )?(?:include|have|support)|do not have)\s+(?:a )?payroll calculation tool\b",
+                sentence, re.IGNORECASE,
+            ):
+                return True
+    return False
+
+
 def requested_documents(question: str) -> dict[str, list[str]]:
     """Resolve explicit CRA publication codes from this user turn, not model text."""
     catalog = json.loads((ROOT / "knowledge/sources/catalog.json").read_text(encoding="utf-8"))
@@ -137,10 +290,12 @@ def document_violation(requested: dict[str, list[str]], sources: list[dict]) -> 
 
 
 def payroll_amount_violation(text: str) -> str | None:
-    """Block numeric payroll outputs while the calculation capability is absent."""
+    """Catch amount assignments, rather than any nearby annual-salary mention."""
     amount = r"(?:\$\s*\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*(?:CAD|dollars)\b)"
     label = r"(?:gross\s+pay|net\s+pay|take.home\s+pay|pay\s+per\s+(?:period|cheque|check)|(?:CPP|EI|tax|payroll)\s+(?:deductions?|withholdings?)|deduction\s+amounts?)"
-    if re.search(label + r"[^.!?\n]{0,65}" + amount, text, re.IGNORECASE) or re.search(
+    period = r"(?:\s+per\s+(?:pay\s+)?period|\s*\((?:biweekly|bi-weekly|weekly|monthly)\))?"
+    assignment = r"[\s*:=\-]*(?:(?:is|are|will be|would be|equals?|comes to|totals?)\s+)?(?:(?:approximately|about|roughly|estimated at)\s+)?[\s*]*"
+    if re.search(label + period + assignment + amount, text, re.IGNORECASE) or re.search(
         amount + r"\s*(?:gross|net)?\s*(?:per|each|every|/)\s*(?:pay\s*period|paycheque|paycheck|biweekly|bi-weekly|week|month)\b",
         text, re.IGNORECASE,
     ) or re.search(r"\d[\d,.]*\s*(?:/|÷|divided by)\s*(?:12|24|26|52)\s*=", text, re.IGNORECASE):
@@ -148,10 +303,33 @@ def payroll_amount_violation(text: str) -> str | None:
     return None
 
 
+def rejected_draft_diagnostic(message: AIMessage) -> dict[str, Any] | None:
+    """Opt-in final-output diagnostics; never dump API metadata or reasoning blocks."""
+    if message.response_metadata.get("status") not in (None, "completed"):
+        return None
+    if not message.tool_calls:
+        # Only plain final text; content blocks may contain provider reasoning.
+        text = message.content if isinstance(message.content, str) else ""
+        kind = "plain_text"
+    elif len(message.tool_calls) == 1 and message.tool_calls[0]["name"] == SUBMIT_NAME:
+        try:
+            draft = FinalResponse.model_validate(message.tool_calls[0]["args"])
+        except ValidationError:
+            return None
+        text, kind = draft.text, "submit_response"
+    else:
+        return None
+    for key, value in os.environ.items():
+        if any(word in key.upper() for word in ("KEY", "TOKEN", "SECRET", "PASSWORD")) and len(value) >= 8:
+            text = text.replace(value, "[REDACTED]")
+    text = re.sub(r"(?:pplx-|gh[pousr]_)[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}", "[REDACTED]", text)
+    return {"kind": kind, "text": text[:8000], "truncated": len(text) > 8000}
+
+
 def applicability_violation(text: str, sources: list[dict], payment_date: str | None) -> str | None:
     """Catch observed definitive application claims when source dates are unresolved."""
-    if payment_date is None or not any(
-        source_applicability(source, payment_date) == "effective_dates_incomplete" for source in sources
+    if not any(
+        source_applicability(source, payment_date) in ("effective_dates_incomplete", "payment_date_missing") for source in sources
     ):
         return None
     for sentence in re.split(r"[.!?\n]", text):
@@ -160,20 +338,27 @@ def applicability_violation(text: str, sources: list[dict], payment_date: str | 
             r"\b(?:your|this|the) (?:intended )?(?:payment|pay) date\b|"
             r"\b(?:your|this|the) (?:intended )?(?:payment|pay) date\b.{0,90}"
             r"\b(?:apply|applies|applicable|valid|in force|effective)\b|"
-            r"\b(?:would|should|will|does|must)\s+(?:(?:ordinarily|normally|generally|still)\s+)?(?:govern|apply)\b|"
+            r"\b(?:would|should|will|does|must)\s+(?:(?:ordinarily|normally|generally|still)\s+)?govern\b|"
+            r"\b(?:edition|tables?|guidance|(?:these|those|the retrieved) rules)\s+(?:would|should|will|does|must)\s+"
+            r"(?:(?:ordinarily|normally|generally|still)\s+)?apply\b|"
             r"\b(?:governs|governing|is applicable|is valid|remains effective)\b|"
-            r"\b(?:applies|valid|effective)\s+(?:on|for|through)\s+\d{4}-\d{2}-\d{2}\b",
+            r"\b(?:applies|valid|effective)\s+(?:on|for|through)\s+\d{4}-\d{2}-\d{2}\b|"
+            r"\b(?:apply|applies|covers?|aligns? with|valid for)\b.{0,100}"
+            r"\b(?:payment|pay) date\b|"
+            r"\b(?:apply|applies|covers?|aligns? with|valid for)\b.{0,55}"
+            r"(?:\b\d{4}-\d{2}-\d{2}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(?:\d{1,2},?\s+)?\d{4}\b)",
             sentence, re.IGNORECASE,
         )
         if claim:
             qualified = re.search(
                 r"\b(?:cannot|can't|unable to|do not)\s+(?:currently )?"
                 r"(?:confirm|verify|establish|determine|know)\b|"
-                r"\b(?:unknown|uncertain|unresolved|unverified)\s+(?:whether|if)\b",
+                r"\b(?:unknown|uncertain|unresolved|unverified)\s+(?:whether|if)\b|"
+                r"\b(?:does not|do not|cannot|can't)\s+(?:confirm|establish|prove|guarantee)\b",
                 sentence[:claim.start()], re.IGNORECASE,
             )
             if not qualified:
-                return "Effective dates are incomplete; do not claim the guidance applies to the user's payment date. Explain that applicability cannot be confirmed"
+                return "Effective dates are incomplete or the payment date is missing; do not claim the guidance applies to the user's payment date. Explain that applicability cannot be confirmed"
     return None
 
 
@@ -248,6 +433,10 @@ class AgentState(TypedDict):
     payment_date: str | None
     payment_date_status: str
     requested_documents: dict[str, list[str]]
+    calculation_limit_disclosed: bool
+    requested_confirmations: dict[str, str]
+    intake_route: str | None
+    intake_context: dict[str, str]
     evidence: dict[str, dict[str, Any]]
     trace: list[dict[str, Any]]
     outcome: dict[str, Any]
@@ -272,6 +461,12 @@ When the user explicitly names a CRA publication, search and cite that publicati
 Never silently substitute a different guide. If it is unavailable, say so.
 When effective dates are incomplete, do not say an edition would ordinarily govern
 or should apply. Explain the edition's content and that applicability is unconfirmed.
+review_status and needs_update_review are this project's INTERNAL review metadata.
+They do not mean CRA review, CRA approval, or a CRA update warning. Describe them
+as internal content/update review. Preserve every requested confirmation listed
+in runtime context when submitting or correcting the response, without arithmetic.
+Publication edition year does not establish its calendar-year or tax-year coverage.
+State a reporting year only when a cited passage explicitly establishes that coverage.
 
 STATUS AND CAPABILITY RULES:
 - Employee-specific payday, employee lookups, company schedules and compensation
@@ -286,6 +481,11 @@ STATUS AND CAPABILITY RULES:
   frequency on follow-up. Never say "I can calculate", "I will calculate", or
   "once you provide details I can calculate". You may offer to retrieve and explain
   applicable guidance; collected inputs do not enable a calculation tool.
+  Once this limitation has been disclosed in completed assistant history, a short
+  follow-up may confirm details and ask the next question without repeating it.
+  If runtime calculation_limit_disclosed is false, disclose the limitation during
+  salary intake. Earlier user statements or rejected model drafts do not count.
+  A previous disclosure never permits calculation promises or derived amounts.
 - Ask for the intended payment date; do not silently use today's date or assume a
   tax year, TD1 amounts, exemptions, or year-to-date contributions. If details are
   sufficient but calculation is still requested, use unsupported and explain the
@@ -298,6 +498,10 @@ STATUS AND CAPABILITY RULES:
   in YYYY-MM-DD form when confirming context. An illustrative date-format example
   never establishes the user's date. Do not select a tax year when that date is missing.
   Without that date, do not choose a year's standard TD1 amounts or YTD cutoff.
+  Do not promise to retrieve "applicable 2026 tables" or ask what was withheld
+  "so far in 2026" before the user supplies a payment date. Keep intake year-neutral.
+  Named publication editions may be described as historical evidence, without
+  treating their edition year as the user's payroll year.
 - General payroll document questions can use answer with supporting retrieved
   sources. Clarification is for missing information relevant to a supported task
   or transparent payroll intake, never a substitute for explaining unavailable tools.
@@ -325,6 +529,9 @@ the turn without another model call. If the application rejects a completed
 response, it may give you one correction opportunity within the existing call budget.
 Use {SUBMIT_NAME} for clarification and unsupported
 responses too, with an empty citations list when there is no supporting evidence.
+Clarification may include a brief cited explanation followed by a specific question.
+Its citations must be evidence retrieved this turn and obey the same document,
+effective-date and calculation rules as an answer. Do not invent table applicability.
 Use status answer only when retrieved evidence supports the response. Cite all
 supporting sources using the citations list and optionally [S1] in text. Do not
 write URLs yourself; the application attaches source links and PDF pages.
@@ -333,7 +540,8 @@ Never include hidden reasoning.
 """
 
 
-def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
+def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *, diagnostics: bool = False,
+                route_intake: bool = True):
     """Compile explicit nodes; dependencies can be replaced for offline tests."""
     search_tool = StructuredTool.from_function(
         func=retriever, name=TOOL_NAME, args_schema=SearchArguments,
@@ -342,9 +550,52 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
     bound_model = model.bind_tools([search_tool, submission_tool()])
     prompt = system_prompt()
 
+    def intake_node(state: AgentState) -> dict:
+        """Render collected user facts without model arithmetic or invented dates."""
+        context = state["intake_context"]
+        lines = []
+        if "annual_salary" in context:
+            lines.append(f"Annual salary: ${Decimal(context['annual_salary']):,f}.")
+        if "pay_frequency" in context:
+            lines.append(f"Pay frequency: {context['pay_frequency']}.")
+        if state["payment_date"]:
+            lines.append(f"Payment date: {state['payment_date']}.")
+        route = state["intake_route"]
+        if route == "payday":
+            text = "I cannot determine an employee's next payday because employee records and the company payroll calendar are not connected. Please check the company payroll schedule or HR system."
+            if state["requested_confirmations"] and lines:
+                text = "\n".join(lines) + "\n\n" + text
+            status = "unsupported"
+        else:
+            text = "\n".join(lines)
+            if text:
+                text += "\n\n"
+            if route == "calculation":
+                text += "Payroll calculation is not implemented in this prototype. I cannot provide gross-pay estimates, deduction amounts, or net pay. A connected calculation tool is required."
+                status = "unsupported"
+            else:
+                text += "Payroll calculation is not implemented in this prototype. I can collect details and retrieve official guidance. "
+                missing = []
+                if not state["payment_date"]:
+                    missing.append("the intended payment date in YYYY-MM-DD format")
+                if "pay_frequency" not in context:
+                    missing.append("the pay frequency (weekly, biweekly, semimonthly, or monthly)")
+                if "annual_salary" not in context:
+                    missing.append("one annual salary amount in dollars")
+                text += ("What is " + "; and ".join(missing) + "?" if missing
+                         else "Which deduction topic would you like guidance on: income tax, CPP, or EI?")
+                status = "clarification"
+        # The same final-response contract still runs, including confirmation checks.
+        return {"messages": [AIMessage(content="", tool_calls=[{
+            "name": SUBMIT_NAME, "id": "intake_submission", "type": "tool_call",
+            "args": {"status": status, "text": text, "citations": []},
+        }])], "trace": [*state["trace"], {"event": "intake", "route": route, "model_calls": 0}]}
+
     def model_node(state: AgentState) -> dict:
         date_context = {"payment_date": state["payment_date"], "status": state["payment_date_status"]}
         messages = [SystemMessage(content=prompt + "\n\nREQUESTED PUBLICATIONS: " + json.dumps(state["requested_documents"])
+            + "\nCALCULATION LIMIT DISCLOSED IN COMPLETED HISTORY: " + json.dumps(state["calculation_limit_disclosed"])
+            + "\nREQUIRED USER CONFIRMATIONS: " + json.dumps(state["requested_confirmations"])
             + "\nUse only these document IDs when publications are requested. An empty ID list means unavailable; do not substitute."
             + "\n\nUSER PAYMENT DATE CONTEXT: " + json.dumps(date_context)
             + "\nThis context is derived only from user messages, never from retrieved documents. "
@@ -361,7 +612,12 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                     "status": "unsupported", "text": "The evidence context reached its limit. Please narrow the question.", "citations": []
                 },
             }])]}
-        response = bound_model.invoke(messages)
+        if state["correction_attempts"]:
+            # This route cannot force tool_choice. Limit repair to finalization,
+            # with strict JSON as a locally validated alternative to function calling.
+            response = model.bind_tools([submission_tool()]).invoke(messages)
+        else:
+            response = bound_model.invoke(messages)
         if not isinstance(response, AIMessage):
             raise ValueError("Unexpected model response type")
         calls = state["model_calls"] + 1
@@ -416,7 +672,7 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                         evidence[source_id] = dict(item)
                         results.append({"source_id": source_id, **item,
                             "payment_applicability": source_applicability(item, state["payment_date"])})
-                    output = {**result, "results": results}
+                    output = {**result, "results": results, "review_metadata_origin": "internal_project"}
                     if not results and result["status"] == "evidence_found":
                         output["status"] = "no_evidence"
                 except Exception:
@@ -435,6 +691,8 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
         last = state["messages"][-1]
         if last.response_metadata.get("status") not in (None, "completed"):
             return "finish"
+        if state["correction_attempts"]:
+            return "finish"
         if any(call["name"] == SUBMIT_NAME for call in last.tool_calls):
             return "finish"
         return "tools" if last.tool_calls else "finish"
@@ -450,9 +708,15 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                 raise ValueError("Model response was incomplete or unsuccessful")
             if not isinstance(last, AIMessage):
                 raise ValueError("Run exhausted before a final response")
-            if len(last.tool_calls) != 1 or last.tool_calls[0]["name"] != SUBMIT_NAME:
+            response_format = "submit_response"
+            if len(last.tool_calls) == 1 and last.tool_calls[0]["name"] == SUBMIT_NAME:
+                draft = FinalResponse.model_validate(last.tool_calls[0]["args"]).model_dump()
+            elif state["correction_attempts"] and not last.tool_calls and isinstance(last.content, str):
+                # Parse the whole message, never extract a plausible object from prose.
+                draft = FinalResponse.model_validate_json(last.content).model_dump()
+                response_format = "validated_json_repair"
+            else:
                 raise ValueError("A single submit_response tool call is required")
-            draft = FinalResponse.model_validate(last.tool_calls[0]["args"]).model_dump()
             status, text, citations = draft["status"], draft["text"], draft["citations"]
             if status not in ("answer", "clarification", "unsupported") or not isinstance(text, str) or not text.strip():
                 raise ValueError("Invalid response")
@@ -467,22 +731,34 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
                 raise ValueError("URL does not match a cited source")
             if status == "answer" and not citations:
                 raise ValueError("Answer lacks retrieved evidence")
-            if status == "clarification" and citations:
-                raise ValueError("Clarification cannot claim source-backed conclusions")
+            if status == "clarification" and "?" not in text:
+                raise ValueError("Clarification must ask a specific question")
+            for violation in (confirmation_violation(text, state["requested_confirmations"]), review_metadata_violation(text)):
+                if violation:
+                    raise ValueError(violation)
+            violation = reporting_year_violation(text, [state["evidence"][key] for key in citations])
+            if violation:
+                raise ValueError(violation)
             violation = capability_violation(status, text)
             if violation:
                 raise ValueError(violation)
             violation = payroll_amount_violation(text)
             if violation:
                 raise ValueError(violation)
-            if status == "answer":
+            violation = unbacked_amount_violation(text, state["intake_context"])
+            if violation:
+                raise ValueError(violation)
+            if citations:
                 violation = document_violation(state["requested_documents"], [state["evidence"][key] for key in citations])
                 if violation:
                     raise ValueError(violation)
             violation = payment_date_violation(text, state["payment_date"])
             if violation:
                 raise ValueError(violation)
-            if status == "answer" and any(source_applicability(state["evidence"][key], state["payment_date"])
+            violation = year_selection_violation(text, state["payment_date"])
+            if violation:
+                raise ValueError(violation)
+            if any(source_applicability(state["evidence"][key], state["payment_date"])
                 in ("before_effective_from", "after_effective_to", "invalid_effective_dates") for key in citations):
                 raise ValueError("Cited evidence conflicts with known effective-date bounds; retrieve applicable evidence or explain the gap")
             violation = applicability_violation(text, [state["evidence"][key] for key in citations], state["payment_date"])
@@ -497,8 +773,12 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
             else:
                 reason = str(error)
             validation = {"event": "response_validation", "status": "rejected", "reason": reason}
+            if diagnostics and isinstance(last, AIMessage):
+                diagnostic = rejected_draft_diagnostic(last)
+                if diagnostic is not None:
+                    validation["rejected_draft"] = diagnostic
         else:
-            validation = {"event": "response_validation", "status": "accepted"}
+            validation = {"event": "response_validation", "status": "accepted", "format": response_format}
         sources = [{"source_id": key, **state["evidence"][key],
                     "payment_applicability": source_applicability(state["evidence"][key], state["payment_date"])}
                    for key in outcome["citations"]]
@@ -506,9 +786,9 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
         outcome["payment_date_status"] = state["payment_date_status"]
         outcome["sources"] = sources
         if any(item["review_status"] != "approved" for item in sources):
-            outcome["text"] += "\n\nSource content review is pending; this answer is provisional."
+            outcome["text"] += "\n\nSource content review is pending internally within this project; this answer is provisional."
         if any(item.get("needs_update_review") for item in sources):
-            outcome["text"] += "\nSome cited editions need update review; current applicability has not been verified."
+            outcome["text"] += "\nSome cited editions need internal project update review; current applicability has not been verified."
         if any(not item.get("effective_from") or not item.get("effective_to") for item in sources):
             outcome["text"] += "\nSome cited sources have unknown or incomplete effective dates; payment-date applicability remains unresolved."
         elif sources and state["payment_date"] is None:
@@ -521,6 +801,7 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
             state["trace"][-1]["status"] == "rejected"
             and state["correction_attempts"] < MAX_CORRECTIONS
             and state["model_calls"] < MAX_MODEL_CALLS
+            and not (route_intake and state["intake_route"])
             and isinstance(last, AIMessage)
             and last.response_metadata.get("status") in (None, "completed")
         ):
@@ -535,16 +816,34 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
             f"Application validation feedback: {reason}. Your previous response was rejected. "
             f"To finish this original user request, call {SUBMIT_NAME} alone, with exactly "
             "status (answer, clarification, or unsupported), text (a nonempty string), "
-            "and citations (a list of source ID strings). Use citations=[] for clarification "
-            "or an unsupported explanation with no sources. Do not invent missing employee "
+            "and citations (a list of source ID strings). If function calling is unavailable, "
+            "return ONLY a JSON object with those three required fields, without markdown "
+            "fences or prose. Example: {\"status\":\"clarification\",\"text\":\"What is the payment date?\",\"citations\":[]}. "
+            "Plain prose is rejected; do not repeat the earlier response format. "
+            "Only final submission is available during correction; do not request searches. "
+            "Use citations=[] when no evidence supports the response. A clarification may "
+            "cite retrieved evidence for a brief explanation and must ask a specific question. "
+            "All citation, effective-date, requested-publication and calculation checks still apply. "
+            "Do not invent missing employee "
             "records or payroll calculations. Ask for missing details or explain unavailable "
             "capabilities. A policy answer requires supporting evidence retrieved this turn. "
             "Employee payday requests must use unsupported because employee records and "
             "the company payroll calendar are not connected. Salary intake may use clarification "
             "but must disclose the unavailable calculation tool and must not promise calculation. "
+            f"Calculation limitation disclosed in completed history: {state['calculation_limit_disclosed']}. "
+            f"Preserve these requested user confirmations in your final text: {json.dumps(state['requested_confirmations'])}. "
+            "Internal review flags are project metadata, not CRA review or approval. "
+            "When already disclosed, a short follow-up need not repeat it; otherwise disclose it. "
+            "Do not include any derived gross pay per period, estimated deductions, or net pay, "
+            "even alongside a disclaimer. You may confirm the supplied annual salary and pay "
+            "frequency without doing arithmetic. Do not attribute statements or dates to the "
+            "user unless the user actually supplied them. "
             f"The user-provided payment date is {state['payment_date'] or 'missing'} "
             f"(status: {state['payment_date_status']}). If missing, ask for YYYY-MM-DD "
             "before date-sensitive salary intake; do not assume today or a tax year. "
+            "If no payment date is provided, do not select a year for applicable tables "
+            "or year-to-date amounts. Incomplete source dates cannot establish that tables "
+            "apply to a written date such as 'your November 13, 2026 payment date'. "
             f"Available source IDs: {json.dumps(list(state['evidence']))}. "
             "Do not invent citation IDs or URLs. This is your only correction opportunity; "
             "the original model-call and search limits still apply."
@@ -564,11 +863,14 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents):
         }
 
     graph = StateGraph(AgentState)
+    graph.add_node("intake", intake_node)
     graph.add_node("model", model_node)
     graph.add_node("tools", tools_node)
     graph.add_node("finish", finish_node)
     graph.add_node("correct", correction_node)
-    graph.add_edge(START, "model")
+    graph.add_conditional_edges(START, lambda state: "intake" if route_intake and state["intake_route"] else "model",
+                                {"intake": "intake", "model": "model"})
+    graph.add_edge("intake", "finish")
     graph.add_conditional_edges("model", route_model, {"tools": "tools", "finish": "finish"})
     graph.add_conditional_edges("tools", route_tools, {"model": "model", "finish": "finish"})
     graph.add_conditional_edges("finish", route_finish, {"correct": "correct", "end": END})
@@ -594,6 +896,10 @@ def run_turn(graph: Any, question: str, history: list[BaseMessage] | None = None
         "model_calls": 0, "searches": 0, "correction_attempts": 0,
         "payment_date": context["date"], "payment_date_status": context["status"],
         "requested_documents": requested_documents(question),
+        "calculation_limit_disclosed": calculation_limit_disclosed(recent),
+        "requested_confirmations": requested_confirmations([*(history or []), HumanMessage(content=question)], question, context["date"]),
+        "intake_context": requested_confirmations([*(history or []), HumanMessage(content=question)], "Confirm context", context["date"]),
+        "intake_route": intake_route(question, history or []),
         "evidence": {}, "trace": [], "outcome": {},
     }, config={"recursion_limit": 16})
 
