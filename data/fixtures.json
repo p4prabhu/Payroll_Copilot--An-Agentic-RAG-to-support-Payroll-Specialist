@@ -1,0 +1,92 @@
+{
+  "fixture_version": 1,
+  "notes": "Entirely fictional single-employer data. Stored deductions are illustrative amounts, not CRA-validated calculations. History covers payments from 2026-10-16 through the 2026-11-01 snapshot, not the full tax year. Calendar dates and cutoffs are fictional company decisions, not Ontario rules.",
+  "dataset_info": [{"id": 1, "schema_version": 1, "employer_name": "Maple Harbour Demo Employer (fictional)", "is_fictional": 1, "snapshot_date": "2026-11-01", "history_complete_from": "2026-10-16", "description": "Fictional learning dataset; partial-year payment history; not a payroll calculation reference."}],
+  "employees": [
+    {"employee_id": "emp-001", "employee_number": "EMP-1001", "given_name": "Alex", "family_name": "Morgan", "created_at": "2026-01-01T14:00:00Z"},
+    {"employee_id": "emp-002", "employee_number": "EMP-1002", "given_name": "Priya", "family_name": "Shah", "created_at": "2026-01-01T14:00:00Z"},
+    {"employee_id": "emp-003", "employee_number": "EMP-1003", "given_name": "Jordan", "family_name": "Lee", "created_at": "2026-01-01T14:00:00Z"},
+    {"employee_id": "emp-004", "employee_number": "EMP-1004", "given_name": "Alex", "family_name": "Chen", "created_at": "2026-01-01T14:00:00Z"},
+    {"employee_id": "emp-005", "employee_number": "EMP-1005", "given_name": "Sam", "family_name": "Reed", "created_at": "2026-01-01T14:00:00Z"}
+  ],
+  "employments": [
+    {"employment_id": "job-001", "employee_id": "emp-001", "starts_on": "2026-01-01", "ends_before": null, "province_code": "ON", "currency": "CAD"},
+    {"employment_id": "job-002", "employee_id": "emp-002", "starts_on": "2026-01-01", "ends_before": null, "province_code": "ON", "currency": "CAD"},
+    {"employment_id": "job-003", "employee_id": "emp-003", "starts_on": "2026-01-01", "ends_before": null, "province_code": "ON", "currency": "CAD"},
+    {"employment_id": "job-004", "employee_id": "emp-004", "starts_on": "2026-01-01", "ends_before": null, "province_code": "ON", "currency": "CAD"},
+    {"employment_id": "job-005", "employee_id": "emp-005", "starts_on": "2026-01-01", "ends_before": "2026-10-16", "province_code": "ON", "currency": "CAD"}
+  ],
+  "pay_groups": [
+    {"pay_group_id": "group-biweekly", "name": "Fictional salaried biweekly", "frequency": "biweekly", "periods_per_year": 26, "timezone": "America/Toronto"},
+    {"pay_group_id": "group-monthly", "name": "Fictional salaried monthly", "frequency": "monthly", "periods_per_year": 12, "timezone": "America/Toronto"}
+  ],
+  "pay_group_assignments": [
+    {"assignment_id": "assign-001", "employment_id": "job-001", "pay_group_id": "group-biweekly", "valid_from": "2026-01-01", "valid_to": null},
+    {"assignment_id": "assign-002", "employment_id": "job-002", "pay_group_id": "group-biweekly", "valid_from": "2026-01-01", "valid_to": null},
+    {"assignment_id": "assign-003", "employment_id": "job-003", "pay_group_id": "group-monthly", "valid_from": "2026-01-01", "valid_to": null},
+    {"assignment_id": "assign-004", "employment_id": "job-004", "pay_group_id": "group-monthly", "valid_from": "2026-01-01", "valid_to": null},
+    {"assignment_id": "assign-005", "employment_id": "job-005", "pay_group_id": "group-biweekly", "valid_from": "2026-01-01", "valid_to": "2026-10-16"}
+  ],
+  "compensation_rates": [
+    {"compensation_id": "comp-001", "employment_id": "job-001", "pay_basis": "annual_salary", "annual_salary_cents": 5000000, "currency": "CAD", "valid_from": "2026-01-01", "valid_to": null, "change_reason": "Fictional starting salary", "recorded_at": "2026-01-01T14:00:00Z"},
+    {"compensation_id": "comp-002a", "employment_id": "job-002", "pay_basis": "annual_salary", "annual_salary_cents": 7500000, "currency": "CAD", "valid_from": "2026-01-01", "valid_to": "2026-11-01", "change_reason": "Fictional starting salary", "recorded_at": "2026-01-01T14:00:00Z"},
+    {"compensation_id": "comp-002b", "employment_id": "job-002", "pay_basis": "annual_salary", "annual_salary_cents": 8000000, "currency": "CAD", "valid_from": "2026-11-01", "valid_to": null, "change_reason": "Fictional salary increase; preserve prior rate", "recorded_at": "2026-10-28T14:00:00Z"},
+    {"compensation_id": "comp-003", "employment_id": "job-003", "pay_basis": "annual_salary", "annual_salary_cents": 6000000, "currency": "CAD", "valid_from": "2026-01-01", "valid_to": null, "change_reason": "Fictional starting salary", "recorded_at": "2026-01-01T14:00:00Z"},
+    {"compensation_id": "comp-004", "employment_id": "job-004", "pay_basis": "annual_salary", "annual_salary_cents": 6500000, "currency": "CAD", "valid_from": "2026-01-01", "valid_to": null, "change_reason": "Fictional starting salary", "recorded_at": "2026-01-01T14:00:00Z"},
+    {"compensation_id": "comp-005", "employment_id": "job-005", "pay_basis": "annual_salary", "annual_salary_cents": 4000000, "currency": "CAD", "valid_from": "2026-01-01", "valid_to": "2026-10-16", "change_reason": "Fictional ended employment", "recorded_at": "2026-01-01T14:00:00Z"}
+  ],
+  "pay_runs": [
+    {"pay_run_id": "bw-2026-10-16", "pay_group_id": "group-biweekly", "period_start": "2026-10-02", "period_end": "2026-10-15", "payment_date": "2026-10-16", "cutoff_at_utc": "2026-10-13T16:00:00Z", "status": "posted"},
+    {"pay_run_id": "bw-2026-10-30", "pay_group_id": "group-biweekly", "period_start": "2026-10-16", "period_end": "2026-10-29", "payment_date": "2026-10-30", "cutoff_at_utc": "2026-10-27T16:00:00Z", "status": "posted"},
+    {"pay_run_id": "bw-2026-11-13", "pay_group_id": "group-biweekly", "period_start": "2026-10-30", "period_end": "2026-11-12", "payment_date": "2026-11-13", "cutoff_at_utc": "2026-11-10T17:00:00Z", "status": "scheduled"},
+    {"pay_run_id": "bw-2026-11-27", "pay_group_id": "group-biweekly", "period_start": "2026-11-13", "period_end": "2026-11-26", "payment_date": "2026-11-27", "cutoff_at_utc": "2026-11-24T17:00:00Z", "status": "scheduled"},
+    {"pay_run_id": "mo-2026-10-30", "pay_group_id": "group-monthly", "period_start": "2026-10-01", "period_end": "2026-10-31", "payment_date": "2026-10-30", "cutoff_at_utc": "2026-10-27T16:00:00Z", "status": "posted"},
+    {"pay_run_id": "mo-2026-11-30", "pay_group_id": "group-monthly", "period_start": "2026-11-01", "period_end": "2026-11-30", "payment_date": "2026-11-30", "cutoff_at_utc": "2026-11-25T17:00:00Z", "status": "scheduled"}
+  ],
+  "payroll_payments": [
+    {"payment_id": "pay-001", "employment_id": "job-001", "pay_run_id": "bw-2026-10-16", "compensation_id": "comp-001", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 192308, "deduction_cents": 42000, "net_cents": 150308, "status": "posted", "recorded_at": "2026-10-16T12:00:00Z", "recorded_by": "fictional-fixture-loader"},
+    {"payment_id": "pay-002", "employment_id": "job-002", "pay_run_id": "bw-2026-10-16", "compensation_id": "comp-002a", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 288462, "deduction_cents": 70000, "net_cents": 218462, "status": "posted", "recorded_at": "2026-10-16T12:00:00Z", "recorded_by": "fictional-fixture-loader"},
+    {"payment_id": "pay-003", "employment_id": "job-005", "pay_run_id": "bw-2026-10-16", "compensation_id": "comp-005", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 153846, "deduction_cents": 30000, "net_cents": 123846, "status": "posted", "recorded_at": "2026-10-16T12:00:00Z", "recorded_by": "fictional-fixture-loader"},
+    {"payment_id": "pay-004", "employment_id": "job-001", "pay_run_id": "bw-2026-10-30", "compensation_id": "comp-001", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 192308, "deduction_cents": 42000, "net_cents": 150308, "status": "posted", "recorded_at": "2026-10-30T12:00:00Z", "recorded_by": "fictional-fixture-loader"},
+    {"payment_id": "pay-005", "employment_id": "job-002", "pay_run_id": "bw-2026-10-30", "compensation_id": "comp-002a", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 288462, "deduction_cents": 70000, "net_cents": 218462, "status": "posted", "recorded_at": "2026-10-30T12:00:00Z", "recorded_by": "fictional-fixture-loader"},
+    {"payment_id": "pay-006", "employment_id": "job-003", "pay_run_id": "mo-2026-10-30", "compensation_id": "comp-003", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 500000, "deduction_cents": 120000, "net_cents": 380000, "status": "posted", "recorded_at": "2026-10-30T12:00:00Z", "recorded_by": "fictional-fixture-loader"},
+    {"payment_id": "pay-007", "employment_id": "job-004", "pay_run_id": "mo-2026-10-30", "compensation_id": "comp-004", "payment_type": "regular", "province_code": "ON", "currency": "CAD", "gross_cents": 541667, "deduction_cents": 130000, "net_cents": 411667, "status": "posted", "recorded_at": "2026-10-30T12:00:00Z", "recorded_by": "fictional-fixture-loader"}
+  ],
+  "payroll_lines": [
+    {"payment_id": "pay-001", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 192308},
+    {"payment_id": "pay-001", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 20000},
+    {"payment_id": "pay-001", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 10000},
+    {"payment_id": "pay-001", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 9000},
+    {"payment_id": "pay-001", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 3000},
+    {"payment_id": "pay-002", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 288462},
+    {"payment_id": "pay-002", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 35000},
+    {"payment_id": "pay-002", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 15000},
+    {"payment_id": "pay-002", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 15000},
+    {"payment_id": "pay-002", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 5000},
+    {"payment_id": "pay-003", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 153846},
+    {"payment_id": "pay-003", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 14000},
+    {"payment_id": "pay-003", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 6000},
+    {"payment_id": "pay-003", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 7500},
+    {"payment_id": "pay-003", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 2500},
+    {"payment_id": "pay-004", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 192308},
+    {"payment_id": "pay-004", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 20000},
+    {"payment_id": "pay-004", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 10000},
+    {"payment_id": "pay-004", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 9000},
+    {"payment_id": "pay-004", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 3000},
+    {"payment_id": "pay-005", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 288462},
+    {"payment_id": "pay-005", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 35000},
+    {"payment_id": "pay-005", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 15000},
+    {"payment_id": "pay-005", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 15000},
+    {"payment_id": "pay-005", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 5000},
+    {"payment_id": "pay-006", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 500000},
+    {"payment_id": "pay-006", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 65000},
+    {"payment_id": "pay-006", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 30000},
+    {"payment_id": "pay-006", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 18000},
+    {"payment_id": "pay-006", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 7000},
+    {"payment_id": "pay-007", "line_number": 1, "category": "earning", "code": "SALARY", "amount_cents": 541667},
+    {"payment_id": "pay-007", "line_number": 2, "category": "deduction", "code": "FED_TAX", "amount_cents": 70000},
+    {"payment_id": "pay-007", "line_number": 3, "category": "deduction", "code": "ON_TAX", "amount_cents": 35000},
+    {"payment_id": "pay-007", "line_number": 4, "category": "deduction", "code": "CPP", "amount_cents": 18000},
+    {"payment_id": "pay-007", "line_number": 5, "category": "deduction", "code": "EI", "amount_cents": 7000}
+  ]
+}

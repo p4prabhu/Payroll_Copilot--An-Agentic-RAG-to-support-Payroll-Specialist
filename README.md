@@ -30,13 +30,83 @@ retrieval retries, stopping conditions, and confirmation pauses.
 
 ## Data storage
 
-- SQLite: fictional employees, schedules, and pending requests.
+- SQLite: fictional employee/employment records, effective-dated compensation,
+  company calendars, and historical payments. Pending requests remain planned.
 - Source documents: verified CRA, Ontario, and sample company policies.
 - Qdrant local mode: searchable document sections and their embeddings,
   persisted in `knowledge/vector_store/qdrant/`.
 
 Each document section will retain its source, effective date,
 and section identifier so answers can cite the evidence.
+
+## Fictional employee database
+
+The database foundation is implemented separately from the agent. Employee and
+calendar MCP tools are not connected yet, so the agent still reports those
+capabilities as unavailable. This is a single-employer learning dataset, not a
+production payroll system or an Ontario deduction calculator.
+
+The schema follows company-style record separation:
+
+| Table | Responsibility |
+| --- | --- |
+| `dataset_info` | Fictional employer, schema version, snapshot and history coverage |
+| `employees` | Stable internal ID, unique employee number, names |
+| `employments` | Hire/rehire periods and employment jurisdiction |
+| `pay_groups` | Frequency and company timezone |
+| `pay_group_assignments` | Effective-dated membership, without overwriting history |
+| `compensation_rates` | Effective-dated annual salaries and change reasons |
+| `pay_runs` | Explicit company pay periods, payment dates, UTC cutoffs and status |
+| `payroll_payments` | Gross, deduction and net snapshots tied to historical compensation |
+| `payroll_lines` | Separate earnings and deductions such as salary, CPP, EI and taxes |
+
+This separation is informed by the [Dynamics 365 payroll employee model](https://learn.microsoft.com/en-us/dynamics365/human-resources/hr-admin-integration-payroll-api-payroll-employee)
+and [pay-cycle/pay-period model](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/fin-ops/hr/localizations/usa/noam-usa-pay-cycle-pay-period-tasks-sample).
+These are examples of enterprise data patterns, not sources of Ontario payroll rules.
+
+Money is stored in integer CAD cents. Employment, assignment, and compensation
+ranges include the start date and exclude the end date; a null end means an open
+internal employment/rate interval. This differs from unknown effective dates in
+the government-document catalog. Payroll-period start/end dates are inclusive.
+Payment dates can precede period-end, as in the fictional monthly run. Cutoffs
+are stored in UTC; the pay-group timezone is `America/Toronto`.
+
+Posted payment headers, lines, and runs are protected against updates/deletion
+by SQLite triggers. Posting checks line totals and historical employment,
+compensation, and pay-group relationships. Referenced historical salary amounts
+cannot be rewritten. This is integrity protection, not a complete audit system;
+there is no reversal, correction, approval, or production posting workflow yet.
+
+The fixtures contain five employees, two pay groups, six runs and seven payments.
+Alex Morgan (`EMP-1001`) and Alex Chen (`EMP-1004`) deliberately share a first
+name. Priya has a rate change effective 2026-11-01; Sam's employment ended before
+that snapshot. Fixed deductions are fictional examples, not CRA-validated amounts.
+Historical data covers **payments from 2026-10-16 through the 2026-11-01 snapshot**;
+do not present those sums as complete year-to-date totals. Future dates are
+explicit fictional company schedules, not inferred Ontario requirements.
+
+Run these commands from the project directory on Windows, macOS, or Linux:
+
+```sh
+python scripts/init_employee_db.py --dry-run
+python scripts/init_employee_db.py
+python -m unittest discover -s tests -p test_employee_db.py -v
+```
+
+The script uses Python's standard `sqlite3` library (SQLite 3.37+ is required).
+The dry run validates everything in memory. Initialization publishes a validated
+`data/payroll.db` and refuses to overwrite an existing file, including concurrent
+creation. Use `--db data/another_demo.db` for a separate dataset. Publication uses
+a same-directory hard link, so use a local filesystem that supports hard links;
+there is no destructive fallback for unsupported filesystems. Generated `.db`
+files are ignored by Git; commit the schema and fixtures to reproduce them.
+
+`connect_readonly()` opens an existing database in read-only/query-only mode for
+the later MCP layer. No SINs, banking details, tax elections, employee access
+controls, encryption, backup policy, or full change audit are implemented. Those
+need separate design before using real employee data. SQLite file access alone
+does not implement authorization. No agent or live payroll calculation is enabled
+by initializing the database.
 
 ## Knowledge ingestion
 
@@ -259,7 +329,8 @@ Completed:
 Document review and effective-date checks are still required before relying
 on answers. This collection does not cover every Ontario payroll question.
 
-The browser chat application, fictional employee data, payroll calculations,
+The fictional employee database foundation is implemented; its agent/MCP
+connection remains planned. The browser chat application, payroll calculations,
 and MCP tools are not implemented yet.
 
 ## Portability and learning
