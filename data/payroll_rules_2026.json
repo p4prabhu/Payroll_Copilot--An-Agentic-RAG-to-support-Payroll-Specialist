@@ -7,13 +7,14 @@
   "province": "ON",
   "currency": "CAD",
   "method": "T4127 Option 1, with optional year-to-date K2/K2P credit projection",
-  "validation_status": "One user-supplied PDOC screenshot case matched; broader PDOC validation pending; not CRA-certified",
+  "validation_status": "Three user-supplied PDOC screenshot cases matched; broader PDOC validation pending; not CRA-certified",
   "validation_evidence": {
-    "case_id": "salary_50000_biweekly_first",
-    "evidence_type": "User-supplied CRA PDOC results screenshot in this conversation",
+    "case_ids": ["salary_50000_biweekly_first", "salary_60000_monthly_first", "cpp2_threshold_crossing"],
+    "case_count": 3,
+    "evidence_type": "User-supplied CRA PDOC results screenshots in this conversation",
     "recorded_on": "2026-10-19",
     "source_url": "https://apps.cra-arc.gc.ca/ebci/rhpd/beta/entry/en",
-    "scope": "One Ontario biweekly first-payment case; other reference cases have not been compared with PDOC"
+    "scope": "Three selected Ontario cases: regular biweekly, regular monthly, and CPP/CPP2 threshold crossing with EI already capped; other reference cases have not been compared with PDOC"
   },
   "sources": [
     {

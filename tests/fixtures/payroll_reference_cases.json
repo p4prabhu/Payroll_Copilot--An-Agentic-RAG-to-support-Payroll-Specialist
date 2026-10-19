@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reference_method": "Full-payroll reference values originate from a separate exact fractions.Fraction implementation with literal CRA constants, not from the production engine. Federal and Ontario rounding now uses the independently rounded shares recoverable from those frozen references. One case is additionally checked against a user-supplied CRA PDOC screenshot; the remaining cases are arithmetic references, not PDOC-validated results.",
+  "reference_method": "Full-payroll reference values originate from a separate exact fractions.Fraction implementation with literal CRA constants, not from the production engine. Federal and Ontario rounding uses the independently rounded shares recoverable from those frozen references. Three selected cases are additionally checked against user-supplied CRA PDOC screenshots; the remaining cases are arithmetic references, not PDOC-validated results.",
   "source_url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html",
   "source_sections": [
     "T4127 Chapters 1, 2, 4 (Option 1 including optional YTD K2/K2P), 6, 7, 8"
@@ -680,7 +680,7 @@
       "expected_cpp_period_exemption": "291.66"
     }
   ],
-  "external_validation": "One user-supplied PDOC screenshot case recorded and regression-tested. No PDOC comparison is claimed for the other cases; no CRA certification is claimed.",
+  "external_validation": "Three user-supplied PDOC screenshot cases recorded: regular biweekly, regular monthly and a CPP/CPP2 threshold crossing with EI already capped. Other cases have not been compared with PDOC; no CRA certification is claimed.",
   "pdoc_observations": [
     {
       "case_id": "salary_50000_biweekly_first",
@@ -716,6 +716,96 @@
         "taxable_income_per_period": "1905.20"
       },
       "scope_note": "Only this observed input/result pair is PDOC-compared. The screenshot is supplied by the user; no automated PDOC submission or independent capture is claimed."
+    },
+    {
+      "evidence_type": "User-supplied CRA PDOC results screenshot in this conversation",
+      "recorded_on": "2026-10-19",
+      "source_url": "https://apps.cra-arc.gc.ca/ebci/rhpd/beta/entry/en",
+      "scope_note": "Only this observed input/result pair is PDOC-compared. The screenshot is supplied by the user; no automated PDOC submission or independent capture is claimed.",
+      "case_id": "salary_60000_monthly_first",
+      "observed_inputs": {
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "pay_periods_per_year": 12,
+        "gross_pay": "5000.00",
+        "federal_td1_claim": "16452.00",
+        "ontario_td1_claim": "12989.00",
+        "prior_pensionable_earnings": "0.00",
+        "prior_cpp": "0.00",
+        "prior_cpp2": "0.00",
+        "prior_insurable_earnings": "0.00",
+        "prior_ei": "0.00"
+      },
+      "observed_amounts": {
+        "gross_pay": "5000.00",
+        "federal_income_tax": "444.86",
+        "ontario_income_tax": "248.48",
+        "total_income_tax": "693.34",
+        "cpp": "280.15",
+        "cpp2": "0.00",
+        "ei": "81.50",
+        "total_deductions": "1054.99",
+        "net_pay": "3945.01"
+      },
+      "observed_details": {
+        "enhanced_cpp_deduction_f5": "47.08",
+        "taxable_income_per_period": "4952.92"
+      },
+      "observed_ytd_after": {
+        "pensionable_earnings": "5000.00",
+        "cpp": "280.15",
+        "cpp2": "0.00",
+        "ei": "81.50"
+      }
+    },
+    {
+      "evidence_type": "User-supplied CRA PDOC results screenshot in this conversation",
+      "recorded_on": "2026-10-19",
+      "source_url": "https://apps.cra-arc.gc.ca/ebci/rhpd/beta/entry/en",
+      "scope_note": "Only this observed input/result pair is PDOC-compared. The screenshot is supplied by the user; no automated PDOC submission or independent capture is claimed.",
+      "case_id": "cpp2_threshold_crossing",
+      "observed_inputs": {
+        "payment_date": "2026-10-30",
+        "province": "ON",
+        "pay_periods_per_year": 26,
+        "gross_pay": "3500.00",
+        "federal_td1_claim": "16452.00",
+        "ontario_td1_claim": "12989.00",
+        "prior_pensionable_earnings": "73500.00",
+        "prior_cpp": "4205.04",
+        "prior_cpp2": "0.00",
+        "prior_ei_status": "maximum_reached"
+      },
+      "observed_amounts": {
+        "gross_pay": "3500.00",
+        "federal_income_tax": "428.97",
+        "ontario_income_tax": "220.68",
+        "total_income_tax": "649.65",
+        "cpp": "25.41",
+        "cpp2": "96.00",
+        "ei": "0.00",
+        "total_deductions": "771.06",
+        "net_pay": "2728.94"
+      },
+      "observed_details": {
+        "enhanced_cpp_deduction_f5": "100.27",
+        "taxable_income_per_period": "3399.73",
+        "pdoc_displayed_insurable_earnings_per_period": "0.00"
+      },
+      "observed_ytd_after": {
+        "pensionable_earnings": "77000.00",
+        "cpp": "4230.45",
+        "cpp2": "96.00"
+      },
+      "engine_input_mapping": {
+        "ytd.ei": {
+          "value": "1123.07",
+          "basis": "The user selected EI maximum annual premium reached in PDOC. The numeric value is mapped from the reviewed 2026 Ontario EI maximum, not transcribed as a number displayed in the screenshot.",
+          "source_url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html",
+          "source_locator": "Chapter 8 Table 8.7"
+        }
+      },
+      "display_notes": "PDOC displays current-period insurable earnings as 0.00 when EI maximum reached is selected. This is retained as a display observation, not interpreted as EI exemption or compared to the engine cash gross. The employee EI deduction is 0.00 in both results."
     }
   ]
 }

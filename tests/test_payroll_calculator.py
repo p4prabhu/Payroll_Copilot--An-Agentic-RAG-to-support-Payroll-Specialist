@@ -52,20 +52,50 @@ class PayrollCalculatorTests(unittest.TestCase):
 
     def test_user_supplied_pdoc_screenshot_matches_each_displayed_amount(self):
         for observation in REFERENCES["pdoc_observations"]:
-            case = next(c for c in REFERENCES["cases"] if c["id"] == observation["case_id"])
-            result = calculate_payroll(case["input"])
-            inputs = observation["observed_inputs"]
-            for field in ("payment_date", "province", "pay_periods_per_year"):
-                self.assertEqual(case["input"][field], inputs[field])
-            self.assertEqual(result["amounts"], observation["observed_amounts"])
-            details = result["calculation_details"]
-            self.assertEqual(details["federal_claim_used"], inputs["federal_td1_claim"])
-            self.assertEqual(details["ontario_claim_used"], inputs["ontario_td1_claim"])
-            for field in ("pensionable_earnings", "cpp", "cpp2", "ei"):
-                self.assertEqual(case["input"]["ytd"][field], inputs["prior_" + field])
-            self.assertEqual(details["enhanced_cpp_deduction_f5"], observation["observed_details"]["enhanced_cpp_deduction_f5"])
-            self.assertEqual(Decimal(details["annual_taxable_income"]) / case["input"]["pay_periods_per_year"],
-                             Decimal(observation["observed_details"]["taxable_income_per_period"]))
+            with self.subTest(case=observation["case_id"]):
+                case = next(c for c in REFERENCES["cases"] if c["id"] == observation["case_id"])
+                result = calculate_payroll(case["input"])
+                self.assertEqual(result["status"], "calculated", result)
+                inputs = observation["observed_inputs"]
+                for field in ("payment_date", "province", "pay_periods_per_year"):
+                    self.assertEqual(case["input"][field], inputs[field])
+                self.assertEqual(result["amounts"], observation["observed_amounts"])
+                details = result["calculation_details"]
+                self.assertEqual(details["federal_claim_used"], inputs["federal_td1_claim"])
+                self.assertEqual(details["ontario_claim_used"], inputs["ontario_td1_claim"])
+                for field in ("pensionable_earnings", "cpp", "cpp2"):
+                    self.assertEqual(case["input"]["ytd"][field], inputs["prior_" + field])
+                if inputs.get("prior_ei_status") == "maximum_reached":
+                    # PDOC displays a status, not a numeric YTD premium. Keep
+                    # that observation separate from the formula-input mapping.
+                    self.assertNotIn("prior_ei", inputs)
+                    rules, _ = load_rules(RULES_PATH)
+                    mapped = observation["engine_input_mapping"]["ytd.ei"]["value"]
+                    self.assertEqual(mapped, rules["ei"]["maximum"])
+                    self.assertEqual(case["input"]["ytd"]["ei"], mapped)
+                    self.assertEqual(result["amounts"]["ei"], "0.00")
+                else:
+                    self.assertEqual(case["input"]["ytd"]["ei"], inputs["prior_ei"])
+                self.assertEqual(details["enhanced_cpp_deduction_f5"], observation["observed_details"]["enhanced_cpp_deduction_f5"])
+                self.assertEqual(Decimal(details["annual_taxable_income"]) / case["input"]["pay_periods_per_year"],
+                                 Decimal(observation["observed_details"]["taxable_income_per_period"]))
+                for field, observed in observation.get("observed_ytd_after", {}).items():
+                    current = result["amounts"]["gross_pay" if field == "pensionable_earnings" else field]
+                    self.assertEqual(Decimal(case["input"]["ytd"][field]) + Decimal(current), Decimal(observed))
+
+    def test_validation_metadata_covers_exactly_the_three_observed_pdoc_cases(self):
+        expected = {"salary_50000_biweekly_first", "salary_60000_monthly_first", "cpp2_threshold_crossing"}
+        observations = REFERENCES["pdoc_observations"]
+        self.assertEqual(len(observations), 3)
+        self.assertEqual({item["case_id"] for item in observations}, expected)
+        rules, _ = load_rules(RULES_PATH)
+        evidence = rules["validation_evidence"]
+        self.assertEqual(set(evidence["case_ids"]), expected)
+        self.assertEqual(evidence["case_count"], len(observations))
+        self.assertIn("other reference cases have not been compared", evidence["scope"])
+        for item in observations:
+            self.assertIn("User-supplied", item["evidence_type"])
+            self.assertIn("no automated PDOC submission", item["scope_note"])
 
     def test_separate_tax_rounding_preserves_both_shares_and_reconciles_totals(self):
         for index, federal, ontario, total, difference in (
@@ -272,7 +302,7 @@ class PayrollCalculatorTests(unittest.TestCase):
         self.assertIn("broader PDOC validation pending", result["provenance"]["validation_status"])
         self.assertIn("not CRA-certified", result["provenance"]["validation_status"])
         self.assertEqual(result["provenance"]["ruleset_id"], "cra-2026-on-option1-regular-v2")
-        self.assertEqual(result["provenance"]["validation_evidence"]["case_id"], "salary_50000_biweekly_first")
+        self.assertIn("salary_50000_biweekly_first", result["provenance"]["validation_evidence"]["case_ids"])
 
     def test_caller_decimal_precision_does_not_change_payroll_results(self):
         expected = calculate_payroll(self.request())["amounts"]
