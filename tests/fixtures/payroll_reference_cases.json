@@ -1,0 +1,721 @@
+{
+  "schema_version": 1,
+  "reference_method": "Full-payroll reference values originate from a separate exact fractions.Fraction implementation with literal CRA constants, not from the production engine. Federal and Ontario rounding now uses the independently rounded shares recoverable from those frozen references. One case is additionally checked against a user-supplied CRA PDOC screenshot; the remaining cases are arithmetic references, not PDOC-validated results.",
+  "source_url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html",
+  "source_sections": [
+    "T4127 Chapters 1, 2, 4 (Option 1 including optional YTD K2/K2P), 6, 7, 8"
+  ],
+  "rounding_policy": "Current gross, CPP, CPP2, EI and F5 at cents; no rounding of rate ratios. Federal and Ontario per-period income tax rounded independently to cents, then summed. income_tax_rounding_difference records the difference from rounding combined tax once.",
+  "cases": [
+    {
+      "id": "salary_50000_biweekly_first",
+      "input": {
+        "annual_salary": "50000.00",
+        "pay_frequency": "biweekly",
+        "pay_periods_per_year": 26,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-09",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "1923.08",
+        "cpp": "106.41",
+        "cpp2": "0.00",
+        "ei": "31.35",
+        "federal_income_tax": "153.28",
+        "ontario_income_tax": "88.01",
+        "total_income_tax": "241.29",
+        "total_deductions": "379.05",
+        "net_pay": "1544.03"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "134.61",
+        "enhanced_cpp_deduction_f5": "17.88",
+        "annual_taxable_income": "49535.20",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "600.00",
+        "income_tax_rounding_difference": "0.01"
+      }
+    },
+    {
+      "id": "salary_52000_biweekly_separate_tax_rounding",
+      "input": {
+        "annual_salary": "52000.00",
+        "pay_frequency": "biweekly",
+        "pay_periods_per_year": 26,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-09",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "2000.00",
+        "cpp": "110.99",
+        "cpp2": "0.00",
+        "ei": "32.60",
+        "federal_income_tax": "163.23",
+        "ontario_income_tax": "91.60",
+        "total_income_tax": "254.83",
+        "total_deductions": "398.42",
+        "net_pay": "1601.58"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "134.61",
+        "enhanced_cpp_deduction_f5": "18.65",
+        "annual_taxable_income": "51515.10",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "600.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "salary_60000_monthly_first",
+      "input": {
+        "annual_salary": "60000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "5000.00",
+        "cpp": "280.15",
+        "cpp2": "0.00",
+        "ei": "81.50",
+        "federal_income_tax": "444.86",
+        "ontario_income_tax": "248.48",
+        "total_income_tax": "693.34",
+        "total_deductions": "1054.99",
+        "net_pay": "3945.01"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "47.08",
+        "annual_taxable_income": "59435.04",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "600.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "salary_24000_monthly_tax_reduction",
+      "input": {
+        "annual_salary": "24000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "2000.00",
+        "cpp": "101.65",
+        "cpp2": "0.00",
+        "ei": "32.60",
+        "federal_income_tax": "51.75",
+        "ontario_income_tax": "48.09",
+        "total_income_tax": "99.84",
+        "total_deductions": "234.09",
+        "net_pay": "1765.91"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "17.08",
+        "annual_taxable_income": "23795.04",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "227.70",
+        "income_tax_rounding_difference": "-0.01"
+      }
+    },
+    {
+      "id": "zero_regular_pay",
+      "input": {
+        "annual_salary": "0.00",
+        "pay_frequency": "biweekly",
+        "pay_periods_per_year": 26,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-09",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "0.00",
+        "cpp": "0.00",
+        "cpp2": "0.00",
+        "ei": "0.00",
+        "federal_income_tax": "0.00",
+        "ontario_income_tax": "0.00",
+        "total_income_tax": "0.00",
+        "total_deductions": "0.00",
+        "net_pay": "0.00"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "134.61",
+        "enhanced_cpp_deduction_f5": "0.00",
+        "annual_taxable_income": "0.00",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "0.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "salary_50000_biweekly_period23",
+      "input": {
+        "annual_salary": "50000.00",
+        "pay_frequency": "biweekly",
+        "pay_periods_per_year": 26,
+        "pay_period_number": 23,
+        "payment_date": "2026-11-13",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "42307.76",
+          "cpp": "2341.02",
+          "cpp2": "0.00",
+          "ei": "689.70",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "1923.08",
+        "cpp": "106.41",
+        "cpp2": "0.00",
+        "ei": "31.35",
+        "federal_income_tax": "153.28",
+        "ontario_income_tax": "88.01",
+        "total_income_tax": "241.29",
+        "total_deductions": "379.05",
+        "net_pay": "1544.03"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "134.61",
+        "enhanced_cpp_deduction_f5": "17.88",
+        "annual_taxable_income": "49535.20",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "600.00",
+        "income_tax_rounding_difference": "0.01"
+      }
+    },
+    {
+      "id": "cpp2_threshold_crossing",
+      "input": {
+        "annual_salary": "91000.00",
+        "pay_frequency": "biweekly",
+        "pay_periods_per_year": 26,
+        "pay_period_number": 22,
+        "payment_date": "2026-10-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "73500.00",
+          "cpp": "4205.04",
+          "cpp2": "0.00",
+          "ei": "1123.07",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "3500.00",
+        "cpp": "25.41",
+        "cpp2": "96.00",
+        "ei": "0.00",
+        "federal_income_tax": "428.97",
+        "ontario_income_tax": "220.68",
+        "total_income_tax": "649.65",
+        "total_deductions": "771.06",
+        "net_pay": "2728.94"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "134.61",
+        "enhanced_cpp_deduction_f5": "100.27",
+        "annual_taxable_income": "88392.98",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "750.00",
+        "income_tax_rounding_difference": "0.01"
+      }
+    },
+    {
+      "id": "cpp2_last_capped_payment",
+      "input": {
+        "annual_salary": "91000.00",
+        "pay_frequency": "biweekly",
+        "pay_periods_per_year": 26,
+        "pay_period_number": 25,
+        "payment_date": "2026-12-11",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "84000.00",
+          "cpp": "4230.45",
+          "cpp2": "376.00",
+          "ei": "1123.07",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "3500.00",
+        "cpp": "0.00",
+        "cpp2": "40.00",
+        "ei": "0.00",
+        "federal_income_tax": "441.32",
+        "ontario_income_tax": "226.19",
+        "total_income_tax": "667.51",
+        "total_deductions": "707.51",
+        "net_pay": "2792.49"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "134.61",
+        "enhanced_cpp_deduction_f5": "40.00",
+        "annual_taxable_income": "89960.00",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "750.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "annual_caps_reached_monthly",
+      "input": {
+        "annual_salary": "120000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 12,
+        "payment_date": "2026-12-31",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "110000.00",
+          "cpp": "4230.45",
+          "cpp2": "416.00",
+          "ei": "1123.07",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "10000.00",
+        "cpp": "0.00",
+        "cpp2": "0.00",
+        "ei": "0.00",
+        "federal_income_tax": "1482.97",
+        "ontario_income_tax": "798.48",
+        "total_income_tax": "2281.45",
+        "total_deductions": "2281.45",
+        "net_pay": "7718.55"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "0.00",
+        "annual_taxable_income": "120000.00",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "750.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "federal_basic_personal_phaseout",
+      "input": {
+        "annual_salary": "210000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "17500.00",
+        "cpp": "1023.90",
+        "cpp2": "0.00",
+        "ei": "285.25",
+        "federal_income_tax": "3460.91",
+        "ontario_income_tax": "2162.06",
+        "total_income_tax": "5622.97",
+        "total_deductions": "6932.12",
+        "net_pay": "10567.88"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "172.08",
+        "annual_taxable_income": "207935.04",
+        "federal_claim_used": "15893.84",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "900.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "high_income_both_surtaxes",
+      "input": {
+        "annual_salary": "300000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "25000.00",
+        "cpp": "1470.15",
+        "cpp2": "0.00",
+        "ei": "407.50",
+        "federal_income_tax": "5755.12",
+        "ontario_income_tax": "3670.70",
+        "total_income_tax": "9425.82",
+        "total_deductions": "11303.47",
+        "net_pay": "13696.53"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "247.08",
+        "annual_taxable_income": "297035.04",
+        "federal_claim_used": "14829.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "900.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "whole_year_cpp_and_ei_exemption",
+      "input": {
+        "annual_salary": "60000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "basic_personal"
+        },
+        "ontario_claim": {
+          "mode": "basic_personal"
+        },
+        "cpp_status": "exempt_all_year",
+        "ei_status": "exempt_all_year",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "5000.00",
+        "cpp": "0.00",
+        "cpp2": "0.00",
+        "ei": "0.00",
+        "federal_income_tax": "498.55",
+        "ontario_income_tax": "268.67",
+        "total_income_tax": "767.22",
+        "total_deductions": "767.22",
+        "net_pay": "4232.78"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "0.00",
+        "annual_taxable_income": "60000.00",
+        "federal_claim_used": "16452.00",
+        "ontario_claim_used": "12989.00",
+        "annual_ontario_health_premium": "600.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    },
+    {
+      "id": "explicit_zero_td1_claims",
+      "input": {
+        "annual_salary": "60000.00",
+        "pay_frequency": "monthly",
+        "pay_periods_per_year": 12,
+        "pay_period_number": 1,
+        "payment_date": "2026-01-30",
+        "province": "ON",
+        "federal_claim": {
+          "mode": "amount",
+          "amount": "0.00"
+        },
+        "ontario_claim": {
+          "mode": "amount",
+          "amount": "0.00"
+        },
+        "cpp_status": "eligible_all_year",
+        "ei_status": "insurable",
+        "ytd": {
+          "pensionable_earnings": "0.00",
+          "cpp": "0.00",
+          "cpp2": "0.00",
+          "ei": "0.00",
+          "is_complete": true,
+          "employer_scope": "current_employer"
+        },
+        "regular_salary_only": true,
+        "no_other_adjustments": true,
+        "ontario_only_employment": true
+      },
+      "expected_amounts": {
+        "gross_pay": "5000.00",
+        "cpp": "280.15",
+        "cpp2": "0.00",
+        "ei": "81.50",
+        "federal_income_tax": "636.80",
+        "ontario_income_tax": "303.14",
+        "total_income_tax": "939.94",
+        "total_deductions": "1301.59",
+        "net_pay": "3698.41"
+      },
+      "expected_details": {
+        "cpp_period_exemption": "291.66",
+        "enhanced_cpp_deduction_f5": "47.08",
+        "annual_taxable_income": "59435.04",
+        "federal_claim_used": "0.00",
+        "ontario_claim_used": "0.00",
+        "annual_ontario_health_premium": "600.00",
+        "income_tax_rounding_difference": "0.00"
+      }
+    }
+  ],
+  "published_component_checks": [
+    {
+      "case_id": "cpp2_threshold_crossing",
+      "source_url": "https://www.canada.ca/content/dam/cra-arc/migration/cra-arc/tx/bsnss/tpcs/pyrll/t4032/2026/t4032-on-1-26e.pdf",
+      "source_locator": "PDF page 11, printed A-10: biweekly $3,500, period 22, prior pensionable earnings $73,500; CPP2 base $2,400",
+      "expected_cpp2": "96.00"
+    },
+    {
+      "case_id": "salary_50000_biweekly_first",
+      "source_url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html",
+      "source_locator": "Chapter 6 Table 6.1: biweekly basic exemption",
+      "expected_cpp_period_exemption": "134.61"
+    },
+    {
+      "case_id": "salary_60000_monthly_first",
+      "source_url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html",
+      "source_locator": "Chapter 6 Table 6.1: monthly basic exemption",
+      "expected_cpp_period_exemption": "291.66"
+    }
+  ],
+  "external_validation": "One user-supplied PDOC screenshot case recorded and regression-tested. No PDOC comparison is claimed for the other cases; no CRA certification is claimed.",
+  "pdoc_observations": [
+    {
+      "case_id": "salary_50000_biweekly_first",
+      "evidence_type": "User-supplied CRA PDOC results screenshot in this conversation",
+      "recorded_on": "2026-10-19",
+      "source_url": "https://apps.cra-arc.gc.ca/ebci/rhpd/beta/entry/en",
+      "observed_inputs": {
+        "payment_date": "2026-01-09",
+        "province": "ON",
+        "pay_periods_per_year": 26,
+        "gross_pay": "1923.08",
+        "federal_td1_claim": "16452.00",
+        "ontario_td1_claim": "12989.00",
+        "prior_pensionable_earnings": "0.00",
+        "prior_cpp": "0.00",
+        "prior_cpp2": "0.00",
+        "prior_insurable_earnings": "0.00",
+        "prior_ei": "0.00"
+      },
+      "observed_amounts": {
+        "gross_pay": "1923.08",
+        "federal_income_tax": "153.28",
+        "ontario_income_tax": "88.01",
+        "total_income_tax": "241.29",
+        "cpp": "106.41",
+        "cpp2": "0.00",
+        "ei": "31.35",
+        "total_deductions": "379.05",
+        "net_pay": "1544.03"
+      },
+      "observed_details": {
+        "enhanced_cpp_deduction_f5": "17.88",
+        "taxable_income_per_period": "1905.20"
+      },
+      "scope_note": "Only this observed input/result pair is PDOC-compared. The screenshot is supplied by the user; no automated PDOC submission or independent capture is claimed."
+    }
+  ]
+}

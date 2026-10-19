@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "ruleset_id": "cra-2026-on-option1-regular-v2",
+  "verified_on": "2026-10-19",
+  "effective_from": "2026-01-01",
+  "effective_to": "2026-12-31",
+  "province": "ON",
+  "currency": "CAD",
+  "method": "T4127 Option 1, with optional year-to-date K2/K2P credit projection",
+  "validation_status": "One user-supplied PDOC screenshot case matched; broader PDOC validation pending; not CRA-certified",
+  "validation_evidence": {
+    "case_id": "salary_50000_biweekly_first",
+    "evidence_type": "User-supplied CRA PDOC results screenshot in this conversation",
+    "recorded_on": "2026-10-19",
+    "source_url": "https://apps.cra-arc.gc.ca/ebci/rhpd/beta/entry/en",
+    "scope": "One Ontario biweekly first-payment case; other reference cases have not been compared with PDOC"
+  },
+  "sources": [
+    {
+      "id": "t4127-jan-2026",
+      "edition": 122,
+      "effective_from": "2026-01-01",
+      "url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html",
+      "local_pdf": "knowledge/sources/cra/t4127-01-26e.pdf",
+      "sections": ["Chapter 1 rounding", "Chapter 2 TD1 and BPAF", "Chapter 4 Option 1, F5, K2/K2P and Ontario", "Chapters 6 and 7 CPP/CPP2 and EI", "Chapter 8 Tables 8.1-8.7"]
+    },
+    {
+      "id": "t4127-jul-2026",
+      "edition": 123,
+      "effective_from": "2026-07-01",
+      "url": "https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jul/t4127-jul-payroll-deductions-formulas.html",
+      "local_pdf": "knowledge/sources/cra/t4127-jul-26e.pdf",
+      "sections": ["What's new for July 1, 2026: no Ontario change", "Unreproduced formulas refer back to the 122nd edition"]
+    }
+  ],
+  "supported_frequencies": {"biweekly": 26, "monthly": 12},
+  "rounding": {
+    "money": "Decimal ROUND_HALF_UP to cents",
+    "cpp_period_exemption": "Decimal ROUND_DOWN to cents",
+    "enhanced_cpp_deduction_f5": "Round the monetary deduction to cents after applying the unrounded rate ratio",
+    "intermediate_tax_factors": "Preserve precision; round BPAF to cents when dynamic",
+    "income_tax": "Round federal T1/P and Ontario T2/P independently to cents, then sum; matches the user-supplied PDOC result for salary_50000_biweekly_first"
+  },
+  "cpp": {
+    "rate": "0.0595", "base_rate": "0.0495", "first_additional_rate": "0.0100",
+    "annual_exemption": "3500.00", "ympe": "74600.00", "yampe": "85000.00",
+    "maximum": "4230.45", "base_maximum": "3519.45",
+    "cpp2_rate": "0.04", "cpp2_maximum": "416.00"
+  },
+  "ei": {"rate": "0.0163", "maximum": "1123.07", "maximum_insurable_earnings": "68900.00"},
+  "federal": {
+    "lowest_rate": "0.14",
+    "brackets": [
+      {"over": "0", "rate": "0.14", "constant": "0"},
+      {"over": "58523", "rate": "0.205", "constant": "3804"},
+      {"over": "117045", "rate": "0.26", "constant": "10241"},
+      {"over": "181440", "rate": "0.29", "constant": "15685"},
+      {"over": "258482", "rate": "0.33", "constant": "26024"}
+    ],
+    "basic_personal_maximum": "16452.00", "basic_personal_minimum": "14829.00",
+    "basic_personal_phaseout_from": "181440.00", "basic_personal_phaseout_to": "258482.00",
+    "canada_employment_amount": "1501.00"
+  },
+  "ontario": {
+    "lowest_rate": "0.0505", "basic_personal_amount": "12989.00",
+    "brackets": [
+      {"over": "0", "rate": "0.0505", "constant": "0"},
+      {"over": "53891", "rate": "0.0915", "constant": "2210"},
+      {"over": "107785", "rate": "0.1116", "constant": "4376"},
+      {"over": "150000", "rate": "0.1216", "constant": "5876"},
+      {"over": "220000", "rate": "0.1316", "constant": "8076"}
+    ],
+    "surtaxes": [{"over": "5818", "rate": "0.20"}, {"over": "7446", "rate": "0.36"}],
+    "tax_reduction_basic": "300.00",
+    "health_premium": [
+      {"over": "20000", "base": "0", "rate": "0.06", "cap": "300"},
+      {"over": "36000", "base": "300", "rate": "0.06", "cap": "450"},
+      {"over": "48000", "base": "450", "rate": "0.25", "cap": "600"},
+      {"over": "72000", "base": "600", "rate": "0.25", "cap": "750"},
+      {"over": "200000", "base": "750", "rate": "0.25", "cap": "900"}
+    ]
+  },
+  "scope": [
+    "Regular cash salary only; current gross is annual salary divided by exactly 26 or 12 and rounded to cents",
+    "Ontario-only current-employer history; no interprovincial transfers",
+    "CPP eligible for all 12 months or exempt for the whole year; no partial-year eligibility or CPT30 changes",
+    "EI insurable or exempt for the whole year",
+    "All current cash remuneration is pensionable/insurable when eligible",
+    "No bonuses, benefits, pension/RRSP contributions, union dues, garnishments, TD1 tax-exempt declarations, non-resident treatment, extra withholding, dependent tax reduction, or other adjustments",
+    "Complete current-employer YTD pensionable earnings, CPP, CPP2 and EI must be supplied explicitly; never inferred from fixture history"
+  ]
+}

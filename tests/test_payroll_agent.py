@@ -87,6 +87,14 @@ def build_model_agent(model, retriever, **kwargs):
 
 
 class PayrollAgentTests(unittest.TestCase):
+    def test_document_only_graph_keeps_employee_capabilities_disabled(self):
+        model = FakeModel([])
+        state = run_turn(build_agent(model), "When is Alex's next payday?")
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+        self.assertFalse(state["capabilities"]["employee_records"])
+        self.assertFalse(state["capabilities"]["mcp_transport"])
+        self.assertEqual(model.seen, [])
+
     def test_submission_tool_is_bound_without_rejected_response_format(self):
         model = FakeModel([])
         build_model_agent(model, Mock())

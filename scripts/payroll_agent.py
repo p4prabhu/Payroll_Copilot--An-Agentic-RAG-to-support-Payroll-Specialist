@@ -1,12 +1,16 @@
 """A bounded LangGraph document agent with a terminal chat interface."""
 
 import argparse
+import asyncio
+from copy import deepcopy
+from contextlib import nullcontext
 import json
 import os
 import re
 import sys
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, TypedDict
 
 from dotenv import load_dotenv
@@ -19,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from index_documents import ROOT
 from search_documents import search_documents
+from init_employee_db import DEFAULT_DB
+from payroll_mcp_client import PayrollMCPClient, PayrollMCPError
 
 
 DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
@@ -53,7 +59,10 @@ def payment_context(messages: list[BaseMessage]) -> dict[str, Any]:
         if re.search(r"\b(?:clear|reset)\s+(?:the\s+)?(?:payment|payroll|pay)\s+date\b", text, re.IGNORECASE):
             context = {"date": None, "status": "missing"}
             continue
-        values = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text)
+        # Other explicitly labeled date contexts must not become payment dates.
+        date_text = text[labeled.end():] if labeled else text
+        date_text = re.split(r"\b(?:as of|lookup date)\b", date_text, maxsplit=1, flags=re.I)[0]
+        values = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", date_text)
         if len(set(values)) > 1:
             context = {"date": None, "status": "ambiguous"}
         elif values:
@@ -426,6 +435,8 @@ class SearchArguments(BaseModel):
 
 
 class AgentState(TypedDict):
+    employee_session: dict[str, Any]
+    capabilities: dict[str, bool]
     messages: Annotated[list[BaseMessage], add_messages]
     model_calls: int
     searches: int
@@ -442,7 +453,7 @@ class AgentState(TypedDict):
     outcome: dict[str, Any]
 
 
-def system_prompt() -> str:
+def system_prompt(capabilities: dict | None = None) -> str:
     skill = (ROOT / "skills/ontario-payroll/SKILL.md").read_text(encoding="utf-8")
     return f"""You assist an Ontario payroll specialist. Ask for the payment date when applicability depends on it; do not infer the applicable year.
 Follow this payroll skill:
@@ -450,7 +461,7 @@ Follow this payroll skill:
 
 CURRENT IMPLEMENTATION:
 Runtime capability inventory (true means available):
-{json.dumps(CAPABILITIES)}
+{json.dumps(capabilities or CAPABILITIES)}
 The skill describes the eventual product; the runtime inventory determines what
 you can do NOW. Missing user details cannot enable a disconnected capability.
 Do not invent access or perform payroll arithmetic yourself.
@@ -469,8 +480,10 @@ Publication edition year does not establish its calendar-year or tax-year covera
 State a reporting year only when a cited passage explicitly establishes that coverage.
 
 STATUS AND CAPABILITY RULES:
-- Employee-specific payday, employee lookups, company schedules and compensation
-  requests are unsupported. Call submit_response(status="unsupported", citations=[])
+- Employee tools run in a separate, deterministic graph node. This document node
+  has no employee evidence and must never invent employee facts or cite database IDs.
+  If asked here about employee-specific payday, employee lookups, company schedules or compensation
+  requests, call submit_response(status="unsupported", citations=[])
   and explain the missing connection. Do not ask for an employee ID or more personal
   data as though that would connect a system. For Alex's next payday, say you cannot
   determine it because employee records and the company payroll calendar are not
@@ -540,15 +553,225 @@ Never include hidden reasoning.
 """
 
 
+def employee_name(question: str) -> str | None:
+    """Extract a name query, never an identity; MCP resolves all actual matches."""
+    word = r"[^\W\d_]+(?:[-’'][^\W\d_]+)*"
+    names = rf"{word}(?:\s+{word}){{0,3}}"
+    record = r"(?:annual\s+salary|salary|compensation|pay\s+frequency|profile|employee\s+details|next\s+payday|payday|pay\s+day|payroll\s+schedule|payment\s+history|payroll\s+history|recorded\s+payments)"
+    reserved = set("what is are was were the a an of for please show me tell find look up search employee employees salary annual compensation pay frequency profile details next payday day payroll schedule payment payments history recorded records as on date lookup from to and or their his her them it this that current stored rules guidance policy tax deductions net calculate estimate explain how when why does do can i we you with today tomorrow clear reset hello hi bonus".split())
+
+    def clean(value):
+        value = re.split(r"\b(?:as of|lookup date|payment date|from\s+\d{4}-|on\s+\d{4}-)\b", value, maxsplit=1, flags=re.I)[0].strip(" \t?!.:,;")
+        tokens = value.split()
+        while tokens and tokens[0].lower() in reserved:
+            tokens.pop(0)
+        candidate = " ".join(tokens)
+        if (re.fullmatch(names, candidate, re.I) and len(candidate) <= 80
+                and not any(token.lower() in reserved for token in tokens)):
+            return candidate
+        return None
+
+    # Capture complete name phrases rather than a hardcoded list of employees.
+    for pattern in (rf"\b({names})[’']s\s+{record}\b",
+                    rf"\b{record}\s+(?:of|for)\s+(.+)",
+                    r"\b(?:find|look up|search for|employee)\s+(.+)",
+                    rf"^\s*({names})\s+{record}\b"):
+        match = re.search(pattern, question, re.I)
+        if match:
+            return clean(match.group(1))
+    # Plain names also support selection by full name after an ambiguous search.
+    # Do not strip question words here: a general question is not a name query.
+    if re.fullmatch(names + r"[.!?]?", question.strip(), re.I):
+        tokens = question.strip(" \t.!?").split()
+        if not any(token.lower() in reserved for token in tokens):
+            return clean(question)
+    return None
+
+
+def employee_request(question: str, session: dict) -> tuple[str | None, str | None]:
+    """A bounded record workflow; broad policy reasoning stays in document RAG."""
+    ids = re.findall(r"\b(?:emp-\d+)\b", question, re.I)
+    target = ids[0] if len(set(x.lower() for x in ids)) == 1 else None
+    if len(set(x.lower() for x in ids)) > 1:
+        return "select_one", None
+    if target is None:
+        target = employee_name(question)
+    lower = question.lower()
+    # Policy questions must still retrieve government evidence, even after a lookup.
+    if re.search(r"\b(?:rules|guidance|policy|t4|cra|explain|calculate|estimate|tax|deductions|net pay)\b", lower) and not re.search(r"\b(?:history|recorded|stored)\b", lower):
+        return None, None
+    if target is None and re.search(r"\b(?:salary|profile|payday|history)\s+(?:of|for)\b", lower):
+        if not re.search(r"\b(?:their|his|her|them)\b", lower):
+            return "select_one", None
+    if "history" in lower or "recorded payments" in lower or "ytd" in lower:
+        action = "history"
+    elif re.search(r"\b(?:payday|pay day|schedule|next pay|next paycheck|next payment)\b", lower):
+        action = "schedule"
+    elif target or re.search(r"\b(?:salary|profile|pay frequency|employee details)\b", lower):
+        action = "profile"
+    else:
+        action = None
+    if action is None and session.get("selected") and re.search(r"\b(?:as of|lookup date)\b", lower):
+        action = session.get("pending_action", "profile")
+    if action and (target or session.get("selected") or session.get("pending_action") or action == "schedule"):
+        return action, target
+    if session.get("pending_action") and re.search(r"\b(?:as of|lookup date|from)\b", lower):
+        return session["pending_action"], target
+    return None, None
+
+
+def employee_date_context(question: str, session: dict) -> None:
+    """Lookup dates are explicit user input, independent of payroll payment dates."""
+    match = re.search(r"\b(?:as of|lookup date)\s*[:=]?\s*(.*)", question, re.I)
+    if re.search(r"\b(?:clear|reset)\s+(?:the\s+)?lookup date\b", question, re.I):
+        session.pop("lookup_date", None)
+    elif match:
+        text = re.split(r"\b(?:payment|payroll|pay)\s+date\b", match.group(1), maxsplit=1, flags=re.I)[0]
+        values = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text)
+        session.pop("lookup_date", None)
+        if len(set(values)) == 1 and re.match(r"\d{4}-\d{2}-\d{2}\b", text):
+            try:
+                session["lookup_date"] = date.fromisoformat(values[0]).isoformat()
+            except ValueError:
+                pass
+    if re.search(r"\bfrom\b", question, re.I):
+        session.pop("history_range", None)
+        match = re.search(r"\bfrom\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})\b", question, re.I)
+        if match:
+            try:
+                start, end = [date.fromisoformat(value).isoformat() for value in match.groups()]
+                if start <= end:
+                    session["history_range"] = [start, end]
+            except ValueError:
+                pass
+
+
+def stored_money(cents: int, currency: str) -> str:
+    if type(cents) is not int or currency != "CAD":
+        raise PayrollMCPError("Invalid stored currency amount")
+    return f"CAD ${Decimal(cents) / 100:,.2f}"
+
+
+def employee_record_text(action: str, result: dict, identity: dict) -> str:
+    """Render stored fields only; no new deductions, totals or payroll arithmetic."""
+    if result.get("employee", {}).get("employee_id") != identity["employee_id"]:
+        raise PayrollMCPError("Employee response does not match the selected record")
+    name = f"{identity['given_name']} {identity['family_name']} ({identity['employee_number']})"
+    lines = [name]
+    status = result["status"]
+    if status == "not_employed_on_date":
+        lines.append(f"No active employment is recorded as of {result['as_of_date']}.")
+    elif action == "profile" and status in ("ok", "data_gap"):
+        lines.append(f"Lookup date: {result['as_of_date']}.")
+        comp, group = result.get("compensation"), result.get("pay_group")
+        lines.append("Stored annual salary: " + stored_money(comp["annual_salary_cents"], comp["currency"]) if comp and comp.get("annual_salary_cents") is not None else "No annual salary is recorded for this date.")
+        lines.append(f"Stored pay frequency: {group['frequency']}." if group else "No pay group is recorded for this date.")
+        if result.get("as_of_after_snapshot"):
+            lines.append("The lookup date is after the dataset snapshot; this is not a live employment verification.")
+    elif action == "schedule" and status in ("ok", "no_scheduled_run"):
+        lines.append(f"Recorded scheduled payment dates strictly after {result['as_of_date']}:")
+        lines.extend(f"- {run['payment_date']} ({run['timezone']}); cutoff {run['cutoff_at_utc']}." for run in result["runs"])
+        if not result["runs"]:
+            lines.append("No future scheduled run is recorded in this snapshot.")
+        lines.append("No dates are extrapolated. Missing runs do not establish that no pay is owed.")
+    elif action == "history" and status in ("ok", "no_recorded_payments"):
+        if result.get("is_complete_ytd") is not False:
+            raise PayrollMCPError("History completeness metadata is invalid")
+        lines.append(f"Stored payments from {result['start_date']} to {result['end_date']} (inclusive):")
+        for payment in result["payments"]:
+            lines.append(f"- {payment['payment_date']} [{payment['payment_id']}]: gross {stored_money(payment['gross_cents'], payment['currency'])}; deductions {stored_money(payment['deduction_cents'], payment['currency'])}; net {stored_money(payment['net_cents'], payment['currency'])}.")
+        if not result["payments"]:
+            lines.append("No recorded payments were found for this range.")
+        lines.append("Partial fictional history; this is not a complete YTD total or a new payroll calculation.")
+        if not result.get("request_within_declared_coverage"):
+            lines.append("The requested range extends outside declared history coverage.")
+    else:
+        raise PayrollMCPError("Employee tool returned an unsupported record status")
+    if result.get("has_more"):
+        lines.append("More records exist; only the first page is shown. Narrow the date range or use the MCP tool's next_offset for subsequent pages.")
+    provenance = result["provenance"]
+    lines.append(f"[D1] Fictional database; snapshot {provenance['dataset_snapshot_date']}. Stored amounts are not CRA-validated.")
+    return "\n".join(lines)
+
+
 def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *, diagnostics: bool = False,
-                route_intake: bool = True):
+                route_intake: bool = True, employee_client: PayrollMCPClient | None = None):
     """Compile explicit nodes; dependencies can be replaced for offline tests."""
     search_tool = StructuredTool.from_function(
         func=retriever, name=TOOL_NAME, args_schema=SearchArguments,
         description="Search local government payroll PDFs. Returns source text, citations, dates and review flags. Optional filters restrict document type, publication edition and pay frequency; they do not verify applicability.",
     )
     bound_model = model.bind_tools([search_tool, submission_tool()])
-    prompt = system_prompt()
+
+    def capabilities() -> dict:
+        available = bool(employee_client and employee_client.available)
+        return {**CAPABILITIES, "employee_records": available, "company_payroll_calendar": available, "mcp_transport": available}
+
+    async def employee_node(state: AgentState) -> dict:
+        session = deepcopy(state["employee_session"])
+        question = str(state["messages"][-1].content)
+        action, target = employee_request(question, session)
+        trace, sources = list(state["trace"]), []
+        calls = 0
+
+        def respond(status, text):
+            return {"employee_session": session, "capabilities": capabilities(), "trace": trace,
+                    "outcome": {"status": status, "text": text, "citations": [s["source_id"] for s in sources], "sources": sources}}
+
+        async def call(name, arguments):
+            nonlocal calls
+            calls += 1
+            if calls > 4:
+                raise PayrollMCPError("Employee tool budget exhausted")
+            result = await employee_client.call(name, arguments)
+            trace.append({"event": "employee_tool", "tool": name, "status": result["status"]})
+            return result
+
+        if not employee_client.available:
+            return respond("unsupported", "Employee MCP records and the payroll calendar are unavailable. Government document search remains available; check the local database/server connection.")
+        if action == "select_one":
+            return respond("clarification", "Which single employee name or number should I use?")
+        employee_date_context(question, session)
+        selection_only = bool(re.fullmatch(r"\s*emp-\d+\s*[.!]?", question, re.I)
+                              or (target and question.strip(" \t.!?").casefold() == target.casefold()))
+        action = session.get("pending_action", action) if selection_only else action
+        session["pending_action"] = action
+        try:
+            if target:
+                session.pop("selected", None)
+                session.pop("candidates", None)
+                found = await call("find_employees", {"query": target, "limit": 10})
+                matches = found["matches"]
+                if found["requires_selection"]:
+                    session["candidates"] = matches
+                    options = "; ".join(f"{e['given_name']} {e['family_name']} ({e['employee_number']})" for e in matches)
+                    more = " More matches exist; narrow the name." if found.get("has_more") else ""
+                    return respond("clarification", f"Fictional database matches: {options}.{more} Which employee number should I use?")
+                if not matches:
+                    return respond("clarification", "No fictional employee matched that search. Which employee number or name prefix should I search?")
+                session["selected"] = matches[0]
+            identity = session.get("selected")
+            if not identity:
+                return respond("clarification", "Which fictional employee number or name prefix should I search?")
+            arguments = {"employee_id": identity["employee_id"]}
+            if action == "history":
+                if not session.get("history_range"):
+                    return respond("clarification", "What inclusive payment-date range should I use? Specify from YYYY-MM-DD to YYYY-MM-DD; this dataset has partial history only.")
+                arguments.update(zip(("start_date", "end_date"), session["history_range"]))
+                tool = "get_payroll_history"
+            else:
+                if not session.get("lookup_date"):
+                    return respond("clarification", "What explicit lookup date should I use? Say 'as of YYYY-MM-DD'. This is separate from the payroll payment date.")
+                arguments["as_of_date"] = session["lookup_date"]
+                tool = "get_payroll_schedule" if action == "schedule" else "get_employee"
+            result = await call(tool, arguments)
+            text = employee_record_text(action, result, identity)
+            sources.append({"source_id": "D1", "kind": "employee_record", "tool": tool,
+                            "arguments": arguments, "employee_id": identity["employee_id"], "provenance": result["provenance"]})
+            session.pop("pending_action", None)
+            return respond("answer", text)
+        except (PayrollMCPError, KeyError, TypeError, ValueError):
+            return respond("unsupported", "The employee lookup could not be verified. Check the employee selection, explicit dates and local MCP connection. No payroll amounts were calculated.")
 
     def intake_node(state: AgentState) -> dict:
         """Render collected user facts without model arithmetic or invented dates."""
@@ -593,7 +816,7 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
 
     def model_node(state: AgentState) -> dict:
         date_context = {"payment_date": state["payment_date"], "status": state["payment_date_status"]}
-        messages = [SystemMessage(content=prompt + "\n\nREQUESTED PUBLICATIONS: " + json.dumps(state["requested_documents"])
+        messages = [SystemMessage(content=system_prompt(state["capabilities"]) + "\n\nREQUESTED PUBLICATIONS: " + json.dumps(state["requested_documents"])
             + "\nCALCULATION LIMIT DISCLOSED IN COMPLETED HISTORY: " + json.dumps(state["calculation_limit_disclosed"])
             + "\nREQUIRED USER CONFIRMATIONS: " + json.dumps(state["requested_confirmations"])
             + "\nUse only these document IDs when publications are requested. An empty ID list means unavailable; do not substitute."
@@ -868,8 +1091,18 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
     graph.add_node("tools", tools_node)
     graph.add_node("finish", finish_node)
     graph.add_node("correct", correction_node)
-    graph.add_conditional_edges(START, lambda state: "intake" if route_intake and state["intake_route"] else "model",
-                                {"intake": "intake", "model": "model"})
+    graph.add_node("employee", employee_node)
+    graph.add_node("prepare", lambda state: {"capabilities": capabilities()})
+
+    def start_route(state):
+        if employee_client is not None and employee_request(str(state["messages"][-1].content), state["employee_session"])[0]:
+            return "employee"
+        return "intake" if route_intake and state["intake_route"] else "model"
+
+    graph.add_edge(START, "prepare")
+    graph.add_conditional_edges("prepare", start_route,
+                                {"intake": "intake", "model": "model", "employee": "employee"})
+    graph.add_edge("employee", END)
     graph.add_edge("intake", "finish")
     graph.add_conditional_edges("model", route_model, {"tools": "tools", "finish": "finish"})
     graph.add_conditional_edges("tools", route_tools, {"model": "model", "finish": "finish"})
@@ -878,7 +1111,7 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
     return graph.compile()
 
 
-def run_turn(graph: Any, question: str, history: list[BaseMessage] | None = None) -> dict:
+def turn_input(question: str, history: list[BaseMessage] | None = None, employee_session: dict | None = None) -> dict:
     """Keep recent completed exchanges; reset evidence and budgets every turn."""
     question = question.strip()
     if not question or len(question) > 4000:
@@ -891,7 +1124,8 @@ def run_turn(graph: Any, question: str, history: list[BaseMessage] | None = None
         raise ValueError("History must contain completed user/assistant exchanges")
     while recent and sum(len(str(message.content)) for message in recent) > 20000:
         recent = recent[2:]
-    return graph.invoke({
+    return {
+        "employee_session": deepcopy(employee_session or {}), "capabilities": dict(CAPABILITIES),
         "messages": [*recent, HumanMessage(content=question)],
         "model_calls": 0, "searches": 0, "correction_attempts": 0,
         "payment_date": context["date"], "payment_date_status": context["status"],
@@ -901,7 +1135,18 @@ def run_turn(graph: Any, question: str, history: list[BaseMessage] | None = None
         "intake_context": requested_confirmations([*(history or []), HumanMessage(content=question)], "Confirm context", context["date"]),
         "intake_route": intake_route(question, history or []),
         "evidence": {}, "trace": [], "outcome": {},
-    }, config={"recursion_limit": 16})
+    }
+
+
+def run_turn(graph: Any, question: str, history: list[BaseMessage] | None = None) -> dict:
+    """Synchronous document-only entry point retained for existing callers."""
+    return graph.invoke(turn_input(question, history), config={"recursion_limit": 16})
+
+
+async def arun_turn(graph: Any, question: str, history: list[BaseMessage] | None = None,
+                    employee_session: dict | None = None) -> dict:
+    """MCP transport and all turns stay inside the caller's async session."""
+    return await graph.ainvoke(turn_input(question, history, employee_session), config={"recursion_limit": 16})
 
 
 def create_model() -> ChatPerplexity:
@@ -917,9 +1162,40 @@ def create_model() -> ChatPerplexity:
 def render_answer(outcome: dict) -> str:
     text = outcome["text"]
     for source in outcome["sources"]:
+        if source.get("kind") == "employee_record":
+            text += f"\n\n[{source['source_id']}] Local fictional database via {source['tool']}; employee {source['employee_id']}."
+            continue
         text += (f"\n\n[{source['source_id']}] {source['title']} — PDF page {source['pdf_page_number']}"
                  f"\n{source['source_url']}")
     return text
+
+
+async def chat(args) -> int:
+    history: list[BaseMessage] = []
+    session = {}
+    async with (nullcontext(None) if args.no_mcp else PayrollMCPClient(args.db)) as client:
+        graph = build_agent(create_model(), employee_client=None if args.no_mcp else client)
+        while True:
+            question = args.question if args.question is not None else input("\nYou (exit to quit, reset to clear): ").strip()
+            if args.question is None and question.lower() in ("exit", "quit"):
+                break
+            if question.lower() == "reset":
+                history, session = [], {}
+                if args.question is not None:
+                    break
+                continue
+            if not question:
+                continue
+            state = await arun_turn(graph, question, history, session)
+            session = state["employee_session"]
+            answer = render_answer(state["outcome"])
+            print(f"\nAgent ({state['outcome']['status']}):\n{answer}")
+            if args.trace:
+                print(json.dumps(state["trace"], indent=2))
+            history.extend([HumanMessage(content=question), AIMessage(content=answer)])
+            if args.question is not None:
+                break
+    return 0
 
 
 def main() -> int:
@@ -928,25 +1204,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("question", nargs="?", help="Omit to start a terminal conversation")
     parser.add_argument("--trace", action="store_true", help="Show model/tool activity without hidden reasoning")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Existing fictional employee database")
+    parser.add_argument("--no-mcp", action="store_true", help="Use the document-only workflow")
     args = parser.parse_args()
-    history: list[BaseMessage] = []
     try:
-        graph = build_agent(create_model())
-        while True:
-            question = args.question if args.question is not None else input("\nYou (exit to quit): ").strip()
-            if args.question is None and question.lower() in ("exit", "quit"):
-                break
-            if not question:
-                continue
-            state = run_turn(graph, question, history)
-            answer = render_answer(state["outcome"])
-            print(f"\nAgent ({state['outcome']['status']}):\n{answer}")
-            if args.trace:
-                print(json.dumps(state["trace"], indent=2))
-            history.extend([HumanMessage(content=question), AIMessage(content=answer)])
-            if args.question is not None:
-                break
-        return 0
+        return asyncio.run(chat(args))
     except (KeyboardInterrupt, EOFError):
         return 0
     except Exception:
