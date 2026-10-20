@@ -260,6 +260,48 @@ def init_database(path: Path = DEFAULT_DB, *, fixture_path: Path = FIXTURE_PATH,
         temporary.unlink(missing_ok=True)
 
 
+def ensure_sample_databases(data_directory: Path | None = None) -> dict[str, dict]:
+    """Bootstrap disposable sample databases on fresh app hosts; never replace files.
+
+    A simultaneous startup may win publication via init_database's atomic hard
+    link. Validate that winner read-only. Corrupt/incompatible existing files
+    require attention, not silent replacement. No API/model/index calls occur.
+    """
+    directory = Path(data_directory) if data_directory is not None else DEFAULT_DB.parent
+    outputs = {}
+    for filename, fixture in (("payroll.db", FIXTURE_PATH),
+                              ("payroll_t4_2026.db", FIXTURE_PATH.with_name("fixtures_t4_2026.json"))):
+        path = directory / filename
+        if path.is_symlink():
+            raise ValueError("Sample database paths must not be symbolic links")
+        created = False
+        if not path.exists():
+            try:
+                init_database(path, fixture_path=fixture)
+                created = True
+            except FileExistsError:
+                pass  # Another startup may have published the complete file.
+        connection = connect_readonly(path)
+        try:
+            metadata = connection.execute("SELECT * FROM dataset_info").fetchall()
+            if (connection.execute("PRAGMA user_version").fetchone()[0] != 1 or len(metadata) != 1
+                    or metadata[0]["schema_version"] != 1 or metadata[0]["is_fictional"] != 1
+                    or connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
+                    or connection.execute("PRAGMA foreign_key_check").fetchall()):
+                raise ValueError("Existing sample database is invalid or incompatible; it was preserved")
+            if filename == "payroll_t4_2026.db":
+                identities = {row[0] for row in connection.execute("SELECT employee_id FROM employees")}
+                covered = {row[0] for row in connection.execute("SELECT employee_id FROM annual_payroll_coverage WHERE reporting_year = 2026")}
+                if not identities or identities != covered:
+                    raise ValueError("Annual sample database does not cover every employee; it was preserved")
+                for employee_id in sorted(identities):
+                    validate_annual_reporting(connection, employee_id, 2026)
+            outputs[filename] = {"path": str(path), "created": created}
+        finally:
+            connection.close()
+    return outputs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="New database path; existing files are never replaced")

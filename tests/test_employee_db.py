@@ -10,7 +10,69 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from init_employee_db import FIXTURE_PATH, connect_readonly, init_database, load_fixture
+from init_employee_db import FIXTURE_PATH, connect_readonly, init_database, load_fixture, ensure_sample_databases
+
+
+class SampleDatabaseStartupTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / "fresh deployment"
+
+    def test_fresh_host_creates_both_databases_and_repeated_startup_preserves_bytes(self):
+        from employee_repository import EmployeeRepository
+        first = ensure_sample_databases(self.root)
+        self.assertTrue(all(item["created"] for item in first.values()))
+        before = {name: (self.root / name).read_bytes() for name in first}
+        second = ensure_sample_databases(self.root)
+        self.assertFalse(any(item["created"] for item in second.values()))
+        self.assertEqual(before, {name: (self.root / name).read_bytes() for name in first})
+        repository = EmployeeRepository(self.root / "payroll.db")
+        self.assertEqual(repository.get_workforce_summary("2026-10-20")["employee_count"], 4)
+        annual = EmployeeRepository(self.root / "payroll_t4_2026.db").get_annual_payroll_summary("emp-001", 2026)
+        self.assertEqual(annual["box_candidates_cents"]["14"], 5000008)
+
+    def test_existing_primary_is_preserved_when_only_annual_database_is_missing(self):
+        primary = self.root / "payroll.db"
+        init_database(primary)
+        before = primary.read_bytes()
+        result = ensure_sample_databases(self.root)
+        self.assertFalse(result["payroll.db"]["created"])
+        self.assertTrue(result["payroll_t4_2026.db"]["created"])
+        self.assertEqual(primary.read_bytes(), before)
+
+    def test_concurrent_startups_publish_only_complete_files(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(ensure_sample_databases, self.root) for _ in range(2)]
+            results = [future.result() for future in futures]
+        self.assertEqual(sum(item["created"] for result in results for item in result.values()), 2)
+        self.assertEqual(list(self.root.glob(".payroll-seed-*")), [])
+        self.assertFalse(any(item["created"] for item in ensure_sample_databases(self.root).values()))
+
+    def test_corrupt_existing_database_is_not_replaced(self):
+        self.root.mkdir()
+        path = self.root / "payroll.db"
+        original = b"not a sqlite database; preserve this file"
+        path.write_bytes(original)
+        with self.assertRaises(sqlite3.DatabaseError):
+            ensure_sample_databases(self.root)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse((self.root / "payroll_t4_2026.db").exists())
+
+    def test_partial_database_cannot_be_used_as_annual_sample(self):
+        path = self.root / "payroll_t4_2026.db"
+        init_database(path)
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "does not cover every employee"):
+            ensure_sample_databases(self.root)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_write_failure_is_propagated_without_silent_success(self):
+        with patch("init_employee_db.init_database", side_effect=PermissionError("read-only filesystem")):
+            with self.assertRaises(PermissionError):
+                ensure_sample_databases(self.root)
+        self.assertFalse(self.root.exists())
 
 
 class AnnualSampleDatabaseTests(unittest.TestCase):

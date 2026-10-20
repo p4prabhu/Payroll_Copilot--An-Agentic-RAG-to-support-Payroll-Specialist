@@ -45,6 +45,22 @@ and section identifier so answers can cite the evidence.
 
 ### Complete sample year-end data for T4 preparation
 
+On Streamlit startup, `app.py` calls `ensure_sample_databases()` to create missing
+`data/payroll.db` and `data/payroll_t4_2026.db` from their committed fixtures.
+This supports a fresh Streamlit Community Cloud checkout, where ignored SQLite
+files do not exist. Existing files are validated read-only and never overwritten;
+concurrent startups use atomic publication. Initialization failures stop the chat
+with a clear setup error and log the underlying exception. This requires a writable
+`data/` directory and SQLite 3.37 or newer. Use Python 3.11 in Cloud deployment
+settings to match the tested environment and pinned NumPy dependency.
+
+These are disposable sample databases, recreated from fixtures when a host loses
+its local files. This startup behavior is not a persistence strategy for real
+employee/payroll records. It makes no model, embedding or other API calls and does
+not build the document vector index. Employee records, workforce counts and sample
+T4 breakdowns do not require an API key; document RAG still needs its own index
+and API configuration.
+
 The default `data/payroll.db` and `data/fixtures.json` retain their partial-history
 scope. A separate **simulated 2026 year-end** fixture contains all five employees,
 38 pay runs, 97 regular payments and 582 earning/deduction lines. Its snapshot is

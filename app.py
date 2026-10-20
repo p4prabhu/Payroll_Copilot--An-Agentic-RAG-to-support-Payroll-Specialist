@@ -1,6 +1,7 @@
 """Local Streamlit chat for payroll specialists."""
 from pathlib import Path
 from decimal import Decimal
+import logging
 import re
 import sys
 from urllib.parse import urlparse
@@ -13,6 +14,7 @@ if str(SCRIPTS) not in sys.path:
 
 from langchain_core.messages import AIMessage, HumanMessage
 from payroll_ui_runtime import run_ui_turn
+from init_employee_db import ensure_sample_databases
 
 
 def reset_chat():
@@ -203,6 +205,12 @@ def display_answer(message):
 def main():
     st.set_page_config(page_title="Payroll Copilot", page_icon=":material/account_balance_wallet:", layout="wide")
     apply_style()
+    try:
+        ensure_sample_databases()
+    except Exception:
+        logging.getLogger(__name__).exception("Sample payroll database startup failed")
+        st.error("The sample payroll databases could not be initialized or validated. Existing files were preserved. Check the deployment logs, committed sample fixtures and write access to the data directory.")
+        st.stop()
     if "chat_messages" not in st.session_state:
         reset_chat()
     with st.sidebar:

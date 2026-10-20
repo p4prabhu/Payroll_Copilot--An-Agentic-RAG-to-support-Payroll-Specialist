@@ -21,6 +21,38 @@ def result(text="Stored salary: CAD $50,000.00", *, session=None, sources=None, 
 
 
 class PayrollUITests(unittest.TestCase):
+    def test_fresh_deployment_initializes_both_databases_then_answers_employee_and_t4_questions(self):
+        from init_employee_db import ensure_sample_databases
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "data"
+            no_model = Mock(side_effect=AssertionError("Sample employee queries must not call a paid model"))
+            runtime = partial(run_ui_turn, db_path=data / "payroll.db", annual_db_path=data / "payroll_t4_2026.db", model_factory=no_model)
+            with patch("init_employee_db.ensure_sample_databases", side_effect=lambda: ensure_sample_databases(data)), \
+                    patch("payroll_ui_runtime.run_ui_turn", side_effect=runtime):
+                app = self.app()
+                self.assertFalse(app.exception)
+                self.assertTrue((data / "payroll.db").exists())
+                self.assertTrue((data / "payroll_t4_2026.db").exists())
+                app.chat_input[0].set_value("Show all active employees as of 2026-10-20").run()
+                self.assertFalse(app.exception)
+                self.assertEqual(app.session_state["chat_messages"][-1]["outcome"]["roster"]["match_count"], 4)
+                app.chat_input[0].set_value("How many employees are active as of 2026-10-20?").run()
+                self.assertIn("**4 active employees**", app.session_state["chat_messages"][-1]["outcome"]["text"])
+                app.chat_input[0].set_value("Show Alex Morgan’s sample T4 breakdown for 2026").run()
+                self.assertFalse(app.exception)
+                self.assertEqual(app.session_state["chat_messages"][-1]["outcome"]["t4_summary"]["box_candidates_cents"]["14"], 5000008)
+            no_model.assert_not_called()
+
+    def test_database_startup_failure_shows_clear_error_and_stops_chat(self):
+        with patch("init_employee_db.ensure_sample_databases", side_effect=PermissionError("private-internal-path")), \
+                patch("payroll_ui_runtime.run_ui_turn") as run:
+            app = self.app()
+            self.assertFalse(app.exception)
+            self.assertTrue(any("could not be initialized or validated" in e.value for e in app.error))
+            self.assertFalse(any("private-internal-path" in e.value for e in app.error))
+            self.assertEqual(len(app.chat_input), 0)
+            run.assert_not_called()
+
     def test_exact_t4_question_shows_box_table_sample_source_and_missing_filing_data(self):
         from init_employee_db import FIXTURE_PATH
         with tempfile.TemporaryDirectory() as directory:
