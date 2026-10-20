@@ -14,6 +14,40 @@ from payroll_mcp_server import create_server
 
 
 class PayrollMCPClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_annual_summary_validates_identity_year_amounts_and_filing_status(self):
+        from init_employee_db import FIXTURE_PATH
+        from copy import deepcopy
+        annual = self.path.with_name("annual.db")
+        init_database(annual, fixture_path=FIXTURE_PATH.with_name("fixtures_t4_2026.json"))
+        args = {"employee_id": "emp-001", "reporting_year": 2026}
+        async with PayrollMCPClient(transport=create_server(self.path, annual)) as client:
+            result = await client.call("get_annual_payroll_summary", args)
+            self.assertEqual(result["box_candidates_cents"]["14"], 5000008)
+            unknown = await client.call("get_annual_payroll_summary", {"employee_id": "missing", "reporting_year": 2026})
+            self.assertEqual(unknown["status"], "not_found")
+        changes = [lambda d: d.update(reporting_year=2025), lambda d: d["employee"].update(employee_id="emp-004"),
+                   lambda d: d["box_candidates_cents"].update({"14": True}), lambda d: d.update(ready_for_filing=True),
+                   lambda d: d["totals"].update(net_pay_cents=1), lambda d: d.update(is_complete_calendar_year=False)]
+        for change in changes:
+            bad = deepcopy(result)
+            change(bad)
+            async with PayrollMCPClient(transport=create_server(self.path, annual)) as client:
+                client._client.call_tool = AsyncMock(return_value=SimpleNamespace(is_error=False, structured_content=bad))
+                with self.assertRaisesRegex(PayrollMCPError, "invalid annual sample summary"):
+                    await client.call("get_annual_payroll_summary", args)
+                self.assertFalse(client.available)
+
+    async def test_roster_schema_and_returned_pagination_are_validated(self):
+        async with self.client() as client:
+            result = await client.call("list_employees", {"as_of_date": "2026-10-19", "limit": 2})
+            self.assertEqual(result["employees"][1]["annual_salary_cents"], 7500000)
+            with self.assertRaises(PayrollMCPError):
+                await client.call("list_employees", {"as_of_date": "2026-10-19", "sql": "SELECT * FROM employees"})
+            bad = {**result, "next_offset": 0}
+            client._client.call_tool = AsyncMock(return_value=SimpleNamespace(is_error=False, structured_content=bad))
+            with self.assertRaisesRegex(PayrollMCPError, "invalid employee roster"):
+                await client.call("list_employees", {"as_of_date": "2026-10-19", "limit": 2})
+            self.assertFalse(client.available)
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -72,7 +106,7 @@ class PayrollMCPClientTests(unittest.IsolatedAsyncioTestCase):
         async with self.client() as valid:
             definitions = list(valid.tools.values())
         for tools in (definitions[:-1], [t.model_copy(deep=True) for t in definitions]):
-            if len(tools) == 4:
+            if len(tools) == len(definitions):
                 tools[0].annotations.read_only_hint = False
             fake = AsyncMock()
             fake.__aenter__.return_value = fake
@@ -81,6 +115,18 @@ class PayrollMCPClientTests(unittest.IsolatedAsyncioTestCase):
                 async with self.client() as client:
                     self.assertFalse(client.available)
                 fake.__aexit__.assert_awaited_once()
+
+    async def test_summary_calls_reject_arbitrary_sql_and_validate_output_counts(self):
+        async with self.client() as client:
+            result = await client.call("get_workforce_summary", {"as_of_date": "2026-11-01"})
+            self.assertEqual(result["employee_count"], 4)
+            with self.assertRaises(PayrollMCPError):
+                await client.call("get_workforce_summary", {"as_of_date": "2026-11-01", "sql": "DELETE FROM employees"})
+            bad = {**result, "employee_count": True}
+            client._client.call_tool = AsyncMock(return_value=SimpleNamespace(is_error=False, structured_content=bad))
+            with self.assertRaisesRegex(PayrollMCPError, "invalid workforce summary"):
+                await client.call("get_workforce_summary", {"as_of_date": "2026-11-01"})
+            self.assertFalse(client.available)
 
     async def test_real_stdio_client_uses_local_database_without_writes(self):
         before = self.path.read_bytes()

@@ -225,3 +225,55 @@ CREATE VIEW payroll_history AS
  FROM payroll_payments p JOIN employments e USING (employment_id)
  JOIN pay_runs r USING (pay_run_id) CROSS JOIN dataset_info d
  WHERE p.status = 'posted';
+
+-- Optional annual-reporting extension. Existing version-1 databases remain readable.
+-- These tables support sample preparation, not CRA filing or real personal data.
+CREATE TABLE employer_tax_profiles (
+    reporting_year INTEGER PRIMARY KEY CHECK (reporting_year = 2026),
+    legal_name TEXT NOT NULL,
+    mailing_address TEXT NOT NULL,
+    payroll_account TEXT CHECK (payroll_account IS NULL),
+    dataset_kind TEXT NOT NULL CHECK (dataset_kind = 'simulated_year_end')
+) STRICT;
+
+CREATE TABLE employee_tax_profiles (
+    employee_id TEXT NOT NULL REFERENCES employees(employee_id),
+    reporting_year INTEGER NOT NULL REFERENCES employer_tax_profiles(reporting_year),
+    mailing_address TEXT NOT NULL,
+    social_insurance_number TEXT CHECK (social_insurance_number IS NULL),
+    dental_benefits_code INTEGER NOT NULL CHECK (dental_benefits_code BETWEEN 1 AND 5),
+    PRIMARY KEY (employee_id, reporting_year)
+) STRICT;
+
+CREATE TABLE annual_payroll_coverage (
+    employee_id TEXT NOT NULL,
+    reporting_year INTEGER NOT NULL,
+    coverage_start TEXT NOT NULL CHECK (coverage_start = '2026-01-01'),
+    coverage_end TEXT NOT NULL CHECK (coverage_end = '2026-12-31'),
+    expected_payments_json TEXT NOT NULL CHECK (json_valid(expected_payments_json)),
+    rules_sha256 TEXT NOT NULL CHECK (length(rules_sha256) = 64),
+    pensionable_ceiling_cents INTEGER NOT NULL CHECK (pensionable_ceiling_cents > 0),
+    insurable_ceiling_cents INTEGER NOT NULL CHECK (insurable_ceiling_cents > 0),
+    assumptions TEXT NOT NULL,
+    PRIMARY KEY (employee_id, reporting_year),
+    FOREIGN KEY (employee_id, reporting_year) REFERENCES employee_tax_profiles(employee_id, reporting_year)
+) STRICT;
+
+CREATE TABLE payroll_tax_bases (
+    payment_id TEXT PRIMARY KEY REFERENCES payroll_payments(payment_id),
+    pensionable_earnings_cents INTEGER NOT NULL CHECK (pensionable_earnings_cents >= 0),
+    insurable_earnings_cents INTEGER NOT NULL CHECK (insurable_earnings_cents >= 0),
+    taxable_benefits_cents INTEGER NOT NULL CHECK (taxable_benefits_cents = 0),
+    calculation_input_json TEXT NOT NULL CHECK (json_valid(calculation_input_json))
+) STRICT;
+
+CREATE TRIGGER tax_bases_no_insert_posted BEFORE INSERT ON payroll_tax_bases
+WHEN (SELECT status FROM payroll_payments WHERE payment_id = NEW.payment_id) = 'posted'
+BEGIN SELECT RAISE(ABORT, 'posted payment tax bases are immutable'); END;
+CREATE TRIGGER tax_bases_no_update_posted BEFORE UPDATE ON payroll_tax_bases
+WHEN (SELECT status FROM payroll_payments WHERE payment_id = OLD.payment_id) = 'posted'
+ OR (SELECT status FROM payroll_payments WHERE payment_id = NEW.payment_id) = 'posted'
+BEGIN SELECT RAISE(ABORT, 'posted payment tax bases are immutable'); END;
+CREATE TRIGGER tax_bases_no_delete_posted BEFORE DELETE ON payroll_tax_bases
+WHEN (SELECT status FROM payroll_payments WHERE payment_id = OLD.payment_id) = 'posted'
+BEGIN SELECT RAISE(ABORT, 'posted payment tax bases are immutable'); END;

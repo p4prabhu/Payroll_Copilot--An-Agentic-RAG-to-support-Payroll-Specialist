@@ -18,6 +18,32 @@ from test_payroll_agent import FakeModel, call, evidence, final
 
 
 class UIRuntimeTests(unittest.TestCase):
+    def test_t4_uses_separate_annual_database_through_real_stdio_without_model_calls(self):
+        from init_employee_db import FIXTURE_PATH
+        annual = self.path.with_name("annual.db")
+        init_database(annual, fixture_path=FIXTURE_PATH.with_name("fixtures_t4_2026.json"))
+        before = self.path.read_bytes(), annual.read_bytes()
+        result = self.turn("Show Alex Morgan’s sample T4 breakdown for 2026", annual_db_path=annual)
+        self.assertEqual(result["outcome"]["status"], "answer")
+        self.assertEqual(result["outcome"]["t4_summary"]["box_candidates_cents"]["14"], 5000008)
+        self.assertFalse(result["outcome"]["t4_summary"]["ready_for_filing"])
+        self.assertEqual(before, (self.path.read_bytes(), annual.read_bytes()))
+        self.no_model.assert_not_called()
+
+    def test_calculation_context_survives_turns_and_reset_requires_fresh_inputs(self):
+        import json
+        payload = json.loads((Path(__file__).parent / "fixtures/payroll_reference_cases.json").read_text(encoding="utf-8"))["cases"][0]["input"]
+        before = self.path.read_bytes()
+        ready = self.turn("Calculate payroll: " + json.dumps(payload))
+        original = deepcopy(ready["employee_session"])
+        completed = self.turn("Confirm calculation", original)
+        self.assertEqual(completed["outcome"]["calculation"]["amounts"]["net_pay"], "1544.03")
+        self.assertTrue(original["_calculation"]["awaiting_confirmation"])
+        reset = self.turn("Confirm calculation")
+        self.assertNotIn("calculation", reset["outcome"])
+        self.assertEqual(before, self.path.read_bytes())
+        self.no_model.assert_not_called()
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

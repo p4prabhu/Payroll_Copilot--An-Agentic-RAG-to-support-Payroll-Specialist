@@ -23,7 +23,9 @@ The agent decides which tools to call, checks retrieved evidence,
 and can search again when information is insufficient.
 
 The payroll skill supplies instructions to the LangGraph agent.
-Payroll arithmetic is reserved for a future deterministic calculation tool.
+Payroll arithmetic runs in a deterministic Python tool through a dedicated
+LangGraph calculation node, after the specialist confirms the input summary.
+This local calculation tool does not use MCP; employee tools use read-only MCP.
 
 LangGraph manages conversation state, tool execution,
 retrieval retries and stopping conditions. Request confirmation remains planned.
@@ -40,6 +42,82 @@ Each document section will retain its source, effective date,
 and section identifier so answers can cite the evidence.
 
 ## Fictional employee database
+
+### Complete sample year-end data for T4 preparation
+
+The default `data/payroll.db` and `data/fixtures.json` retain their partial-history
+scope. A separate **simulated 2026 year-end** fixture contains all five employees,
+38 pay runs, 97 regular payments and 582 earning/deduction lines. Its snapshot is
+2026-12-31, a sample scenario rather than a claim that the year has already closed.
+It includes Priya's November salary change and Sam's final October payment.
+
+```powershell
+python scripts/build_t4_sample_data.py
+python scripts/init_employee_db.py --fixture data/fixtures_t4_2026.json --dry-run
+python scripts/init_employee_db.py --fixture data/fixtures_t4_2026.json --db data/payroll_t4_2026.db
+```
+
+Existing databases are never overwritten. Rebuild into a new database path when
+the fixture changes. The generated fixture is committed; SQLite files are ignored.
+The builder writes only its JSON output and never opens the running app's database.
+
+The optional annual extension adds `employer_tax_profiles`,
+`employee_tax_profiles`, `annual_payroll_coverage` and `payroll_tax_bases` to the
+base schema. Existing version-1 databases remain readable; fixture version 2
+requires all annual tables. Annual coverage uses an explicit per-employee payment
+manifest, rules hash and year-end snapshot, rather than inferring completeness
+from a sum or from a person's annual salary. Initializing the annual fixture
+replays every calculation with sequential current-employer YTD balances and
+checks payment headers, lines, tax bases, contribution ceilings and all five
+employees' coverage. Posted tax bases are immutable like posted payment lines.
+
+`EmployeeRepository(Path("data/payroll_t4_2026.db")).get_annual_payroll_summary(employee_id, 2026)`
+returns reconciled sample box candidates for 14, 16, 16A, 18, 22, 24 and 26,
+plus the dental-benefits code and supplementary gross/deduction/net totals.
+Money is integer CAD cents. Boxes 24 and 26 use the applicable annual earnings
+ceilings; raw earnings remain available in supplementary totals. The method
+works for former employees who were paid during the reporting year. Original
+partial databases, unsupported years or failed reconciliation produce no box
+amounts. The existing paginated history tool retains its conservative partial-YTD
+flag; only the annual method establishes sample-year completeness.
+
+This is a **sample preparation data layer**, not a generated T4, CRA submission,
+or verified actual employee record. `ready_for_sample_breakdown` can be true while
+`ready_for_filing` is always false. SIN and employer payroll account are deliberately
+absent; addresses are explicit placeholders. Verified identities, addresses and
+payroll review are needed before any real filing. The read-only annual summary
+is now exposed through MCP and a dedicated LangGraph T4 node. The Streamlit UI
+uses `data/payroll.db` for ordinary employee operations and
+`data/payroll_t4_2026.db` for annual summaries. No database is switched or rewritten.
+The separate annual database is read-only server configuration, never a tool argument.
+
+Ask **"Show Alex Morgan’s sample T4 breakdown for 2026"**. The agent resolves the
+name, asks for an employee number when ambiguous, and requests a missing reporting
+year without requiring a payment date. It renders the validated box candidates,
+supplementary net pay, assumptions, missing filing data and annual database source.
+These turns make no model or embedding API calls. Definitions and preparation
+checklists continue to use document RAG. Missing/invalid annual records return a
+specific limitation with no monetary figures. Reset clears T4 context.
+
+For terminal use, `--annual-db PATH` overrides the annual database path. The MCP
+server accepts the same option; without it, annual reads use its configured main
+database and report incomplete coverage for the original partial fixture.
+Form/PDF generation and CRA filing are not implemented. A request to generate a
+T4 can provide a clearly labelled sample breakdown, never claim a form was created.
+
+The scenario explicitly assumes regular Ontario salary, basic TD1 claims, CPP
+eligibility for all 12 months, insurable employment, no employer dental coverage,
+and no bonuses, taxable benefits, pension contributions or other adjustments.
+Sam's final entitlements are assumed included in his final regular payment, with
+no off-cycle settlement. The first short biweekly onboarding window receives a
+guaranteed full regular payment; no proration is performed. Gross is rounded per
+payment with no year-end salary true-up (Alex Morgan's 26 payments total
+CAD 50,000.08). These assumptions are stored with each employee's coverage.
+Calculated sample deductions inherit the calculator's limited PDOC validation;
+97 calculated records do not constitute 97 independently validated tax cases.
+
+Box meanings and earnings ceilings are documented in
+[CRA's T4 employer instructions](https://www.canada.ca/en/revenue-agency/services/tax/businesses/topics/payroll/completing-filing-information-returns/t4-information-employers/t4-slip.html).
 
 The database is accessed through read-only MCP tools connected to the terminal
 LangGraph agent. Those capabilities become available only after successful tool
@@ -203,12 +281,15 @@ counter resets for the next user turn.
 
 Runtime capabilities are stated explicitly in the model prompt. Document search,
 conversation and payroll intake are available. Employee records, company payroll
-calendars and MCP transport are enabled after successful local discovery. Payroll
-calculations and compensation requests remain disabled. With MCP unavailable,
+calendars and MCP transport are enabled after successful local discovery. Regular-salary
+calculations are enabled in the terminal and UI through a separate calculation node;
+compensation requests remain disabled. With MCP unavailable,
 employee requests return `unsupported`, explaining the missing connection rather
-than collecting an employee ID. Salary intake may ask
-for missing inputs with `clarification`, but must disclose that calculation is
-unavailable and cannot promise to calculate after receiving those inputs.
+than collecting an employee ID. Calculation intake asks for missing inputs,
+then presents a complete summary and requires explicit confirmation before calling Python.
+The document node cannot calculate or invent payroll amounts. The lower-level
+`build_agent` API defaults to the legacy document/employee behavior; callers must
+pass `enable_calculation=True` to add the calculation workflow, as the UI and CLI do.
 
 The response validator rejects observed calculation/access promises, explicit
 net-pay claims, and clarification responses that acknowledge unavailable employee
@@ -333,8 +414,8 @@ Document review and effective-date checks are still required before relying
 on answers. This collection does not cover every Ontario payroll question.
 
 The fictional employee database, standalone read-only MCP server, terminal agent
-and local Streamlit browser chat are implemented (see below). Payroll calculations,
-request submission and hosted deployment remain unimplemented.
+and local Streamlit browser chat are implemented (see below), along with confirmed
+regular-salary calculations. Request submission and hosted deployment remain unimplemented.
 
 ## Read-only employee MCP server
 
@@ -349,7 +430,7 @@ The layers are:
 MCP client -> stdio MCP server -> employee_repository.py -> read-only payroll.db
 ```
 
-The server exposes exactly four tools:
+The server exposes exactly eight read-only tools:
 
 | Tool | Required inputs | Meaning |
 | --- | --- | --- |
@@ -357,9 +438,13 @@ The server exposes exactly four tools:
 | `get_employee` | `employee_id`, `as_of_date` | Salary and employment/pay group effective on an explicit date |
 | `get_payroll_schedule` | `employee_id`, `as_of_date` | Recorded scheduled payment dates strictly after that date |
 | `get_payroll_history` | `employee_id`, `start_date`, `end_date` | Posted payments and earning/deduction lines in an inclusive payment-date range |
+| `get_workforce_summary` | `as_of_date` | Distinct active employee count and pay-frequency breakdown, optionally filtered by effective pay frequency and annual salary in CAD cents |
+| `get_employment_movements` | `start_date`, `end_date` | Distinct recorded joiners and employment endings, plus event counts, within inclusive dates |
+| `list_employees` | `as_of_date` | Paginated recorded active roster with effective annual salary and pay frequency; optional `limit` and `offset` |
+| `get_annual_payroll_summary` | `employee_id`, `reporting_year` | Reconciled simulated annual T4 box candidates from the configured annual database; no payment date required |
 
 Dates must be real `YYYY-MM-DD` dates, not `today` or an inferred tax year.
-`find_employees`, schedules and history accept `limit` (1-100) and `offset`;
+`find_employees`, rosters, schedules and history accept `limit` (1-100) and `offset`;
 follow `next_offset` while `has_more` is true. Ambiguity is based on all matches,
 even if a one-row page is requested. Dates and status reflect the fictional
 snapshot, not a live HR system. The schedule tool excludes same-day payments
@@ -386,10 +471,10 @@ Then run the real subprocess demonstration:
 python scripts/smoke_payroll_mcp.py
 ```
 
-The smoke client discovers the tools and executes all four against explicit
+The smoke client discovers the tools and executes all eight against explicit
 fixture dates, checking both Alex matches, Alex Morgan's stored salary, the
 recorded 2026-11-13 payment date, and the partial-history flag. It prints the
-inputs, structured responses, and six checks. To use another initialized copy:
+inputs, structured responses, and result checks. To use another initialized copy:
 
 ```sh
 python scripts/smoke_payroll_mcp.py --db "data/another_demo.db"
@@ -435,8 +520,73 @@ remote deployment.
 
 ## LangGraph with employee MCP
 
+### Employee counts and workforce questions
+
+The UI and terminal support bounded database questions through
+`scripts/employee_analytics_workflow.py`, using parameterized read-only SQL via MCP:
+
+- `How many employees are active?` — asks for an explicit as-of date.
+- `2026-11-01` — completes the pending question: **4 recorded active employees**.
+- `How many employees are paid monthly versus biweekly as of 2026-11-01?` — **2 monthly, 2 biweekly**.
+- `How many employees earn more than $70,000 as of 2026-11-01?` — **1**.
+- `How many employees are paid monthly and earn above $60,000 as of 2026-11-01?` — **1**.
+- `How many employees joined or left from 2026-10-01 to 2026-11-01?` — **0 joiners, 1 employment ending**.
+
+These are fixture results, not real company headcounts. The five stored employee
+identities include one ended employment; active count is not the total number of
+stored identities. Headcount uses `[starts_on, ends_before)` and effective-dated
+salary and pay-group records. Salary `above`/`below` are strict; `at least`/`at most`
+are inclusive; salary `between X and Y` includes both bounds. Combined salary and
+frequency filters use AND. An explicit previous workforce as-of date can be reused
+and is shown in the answer; unrelated individual lookup dates are not imported.
+
+Movement ranges include both dates. Endings occur on `ends_before`, the first
+inactive date, not the last workday. Rehires can create multiple start/end events;
+distinct-person counts are separate and must not be presented as net headcount change.
+Dates after the snapshot are unsupported. Missing effective filter data prevents a
+definitive filtered count; unknown pay groups appear explicitly in unfiltered counts.
+Counts describe recorded rows, not independently established complete HR coverage.
+
+No model calls or embeddings are needed for these supported forms. Counts come from
+SQL, not model arithmetic. This is a constrained query workflow, not unrestricted
+text-to-SQL. Unknown filters, departments, locations, names within aggregate filters,
+OR combinations and unsupported query shapes prompt clarification rather than
+silently returning unfiltered results. Each completed summary uses one MCP query
+and D references with the explicit arguments and dataset snapshot. No employee
+records, database schema, fixtures or payroll calculation rules are changed.
+
+### Employee roster
+
+After a headcount question with `2026-10-19`, ask:
+
+`give me the details of all the employee`
+
+The date is retained and the roster lists four recorded active employees:
+Alex Morgan (CAD 50,000), Priya Shah (CAD 75,000), Jordan Lee (CAD 60,000),
+and Alex Chen (CAD 65,000), with employee numbers and pay frequencies. Sam Reed
+is excluded because that employment ended before the requested date. On
+`2026-11-01`, Priya's effective stored salary is CAD 80,000. No payroll amounts
+are calculated and no employee records are changed.
+
+You can also start with `List all employees as of 2026-10-19`. Without a date,
+the workflow asks `As of what date? Please use YYYY-MM-DD.` It reuses only explicit
+workforce dates, not unrelated payment/individual-lookup dates. An unqualified
+all-employee roster resets prior count filters and starts at offset zero.
+Unsupported new salary/frequency/department or inactive-roster filters are not
+silently ignored. Missing salary/pay-group data displays as `Not recorded`.
+
+The roster tool defaults to 20 rows and supports 1–100 per page, with stable
+employee-number/ID ordering. `Next employees` and `Previous employees` chat
+commands and UI controls page through the current roster; controls are disabled
+at the first/last page. Results include total/returned counts, offset, has_more,
+and next_offset. Empty pages do not imply the full roster is empty. Dates after
+the snapshot are unsupported. The roster remains a recorded dataset view, not
+independent proof of a complete HR roster. No model or embedding calls are needed.
+
+### Individual record conversation
+
 The terminal agent now owns a session-scoped `PayrollMCPClient`. It discovers the
-four approved read-only tools before enabling employee/calendar capabilities.
+eight approved read-only tools before enabling employee/calendar/summary capabilities.
 Employee questions run through an asynchronous LangGraph node; the document RAG
 loop still retrieves government PDF evidence. The employee node uses bounded
 intent routing and deterministic rendering of tool results, with no model call
@@ -470,7 +620,8 @@ salary`; exact employee numbers are the most reliable input.
 
 Database facts use D references with tool/employee/provenance metadata. Government
 PDF evidence uses S references with links and pages. Stored amounts are displayed,
-never recalculated; payroll calculations and compensation writes remain disabled.
+never recalculated in the employee node. A separate calculation node uses explicit,
+confirmed inputs; compensation writes remain disabled.
 Each employee turn permits at most four MCP calls and shows at most the first
 schedule/history page, with a warning when more records exist. Use narrower ranges
 or the direct MCP pagination arguments for additional pages.
@@ -534,7 +685,9 @@ provide durable saved conversations or HR authorization.
 
 **Sources** separates fictional database facts from government PDF references.
 **Tool activity** shows observable tool events, without hidden reasoning.
-Payroll calculations and compensation changes remain unsupported.
+Regular-salary calculations require complete confirmed inputs. Compensation
+changes remain unsupported. Calculation provenance uses C references, separate
+from employee D references and government-document S references.
 
 Employee record turns use local MCP without creating a language-model client or
 requiring an API key. Government guidance questions require the existing `.env`
@@ -568,9 +721,39 @@ monthly (exactly 12 periods) payments. It returns gross pay, CPP (base plus firs
 additional), CPP2, EI, federal income tax, Ontario income tax, total deductions
 and estimated net pay. It reads no employee database and makes no API calls.
 
-**This engine is not connected to LangGraph, MCP or the UI yet.** Chat still
-reports calculation as unavailable. Connecting the tested engine is a separate
-step; no capability flags or existing agent safeguards were relaxed here.
+The engine is connected to LangGraph and the UI through
+`scripts/payroll_calculation_workflow.py`. MCP exposes the eight
+read-only employee and summary tools; the calculator is a local Python tool. Document-model
+amount guards remain in place: only a successful calculator result can produce
+new payroll amounts in the calculation workflow.
+
+### Calculation conversation
+
+Start with: `Calculate deductions for an annual salary of $50,000, paid biweekly.`
+The agent uses at most one model call per intake turn to structure explicitly
+supplied user facts. It asks for missing or invalid details, including the payment
+date, province, period count/index, TD1 choices, full-year CPP status, EI status,
+complete current-employer YTD totals before this payment and scope confirmations.
+It does not infer zeros, standard claims, eligibility or absence of adjustments.
+Natural-language intake can incur API charges; arithmetic and final rendering do not.
+
+Once inputs pass validation, the app displays every input and offers
+**Confirm calculation** and **Cancel calculation**. A correction invalidates the
+previous confirmation. Confirmation calls Python once and displays the returned
+gross pay, federal/ provincial tax, CPP, CPP2, EI, deductions and net pay, with
+rule-source links, ruleset hash and limited validation status. No model rewrites
+the resulting amounts, and no employee or payroll records are changed.
+
+Only structured draft values survive UI reruns inside the current conversation.
+Employee lookup clears the draft, and resetting the conversation clears all inputs.
+Partial fixture history never populates complete YTD. The calculation is based
+on user-confirmed inputs, not a verified employee payroll run.
+
+For repeatable offline input, paste a strict calculator JSON object directly into
+chat (or prefix it with `Calculate payroll:`), using the same schema as the engine
+CLI below. Review the summary and confirm. JSON intake and confirmation require
+no model calls. Natural-language behavior is covered with mocked model responses;
+no paid extraction acceptance test was run for this integration.
 
 The implementation follows [CRA T4127 January 2026](https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html)
 Option 1, using the optional year-to-date projection for CPP/EI tax credits.

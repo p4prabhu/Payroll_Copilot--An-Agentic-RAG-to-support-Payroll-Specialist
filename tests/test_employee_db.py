@@ -13,6 +13,96 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from init_employee_db import FIXTURE_PATH, connect_readonly, init_database, load_fixture
 
 
+class AnnualSampleDatabaseTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.fixture_path = FIXTURE_PATH.with_name("fixtures_t4_2026.json")
+
+    def changed_fixture(self, change):
+        fixture = copy.deepcopy(load_fixture(self.fixture_path))
+        change(fixture)
+        path = self.root / "changed.json"
+        path.write_text(json.dumps(fixture), encoding="utf-8")
+        return path
+
+    def test_reproducible_builder_and_all_employee_coverage(self):
+        from build_t4_sample_data import build_fixture
+        fixture = load_fixture(self.fixture_path)
+        self.assertEqual(fixture, build_fixture())
+        self.assertEqual(fixture, build_fixture())
+        summary = init_database(self.root / "annual.db", fixture_path=self.fixture_path)
+        self.assertEqual(summary["counts"]["payroll_payments"], 97)
+        self.assertEqual(len(fixture["annual_payroll_coverage"]), 5)
+        counts = [len(json.loads(c["expected_payments_json"])) for c in fixture["annual_payroll_coverage"]]
+        self.assertEqual(counts, [26, 26, 12, 12, 21])
+        self.assertTrue(all(p["social_insurance_number"] is None for p in fixture["employee_tax_profiles"]))
+
+    def test_missing_payment_is_not_accepted_as_complete(self):
+        def remove_payment(data):
+            removed = data["payroll_payments"].pop()
+            data["payroll_lines"] = [line for line in data["payroll_lines"] if line["payment_id"] != removed["payment_id"]]
+            data["payroll_tax_bases"] = [line for line in data["payroll_tax_bases"] if line["payment_id"] != removed["payment_id"]]
+        fixture = self.changed_fixture(remove_payment)
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            init_database(self.root / "bad.db", fixture_path=fixture)
+        self.assertFalse((self.root / "bad.db").exists())
+
+    def test_missing_employee_coverage_is_rejected(self):
+        fixture = self.changed_fixture(lambda d: d["annual_payroll_coverage"].pop())
+        with self.assertRaisesRegex(ValueError, "every stored employee"):
+            init_database(self.root / "bad.db", fixture_path=fixture)
+
+    def test_partial_snapshot_cannot_claim_full_year(self):
+        fixture = self.changed_fixture(lambda d: d["dataset_info"][0].update(history_complete_from="2026-01-02"))
+        with self.assertRaisesRegex(ValueError, "complete reporting year"):
+            init_database(self.root / "bad.db", fixture_path=fixture)
+
+    def test_tax_bases_rules_and_ytd_must_reconcile(self):
+        def wrong_ytd(data):
+            row = data["payroll_tax_bases"][1]
+            payload = json.loads(row["calculation_input_json"])
+            payload["ytd"]["cpp"] = "0.00"
+            row["calculation_input_json"] = json.dumps(payload)
+        changes = (
+            (lambda d: d["payroll_tax_bases"][0].update(pensionable_earnings_cents=1), "tax bases"),
+            (lambda d: d["annual_payroll_coverage"][0].update(rules_sha256="0" * 64), "rules or ceilings"),
+            (wrong_ytd, "sequential YTD"),
+            (lambda d: d["annual_payroll_coverage"][0].update(insurable_ceiling_cents=1), "rules or ceilings"),
+        )
+        for index, (change, message) in enumerate(changes):
+            with self.subTest(index=index):
+                fixture = self.changed_fixture(change)
+                with self.assertRaisesRegex(ValueError, message):
+                    init_database(self.root / f"bad-{index}.db", fixture_path=fixture)
+
+    def test_balanced_but_incorrect_deductions_are_rejected(self):
+        def change(data):
+            payment = data["payroll_payments"][0]
+            payment["deduction_cents"] += 1
+            payment["net_cents"] -= 1
+            data["payroll_lines"][1]["amount_cents"] += 1
+        fixture = self.changed_fixture(change)
+        with self.assertRaisesRegex(ValueError, "amounts do not reconcile"):
+            init_database(self.root / "bad.db", fixture_path=fixture)
+
+    def test_posted_tax_bases_are_immutable_and_database_not_overwritten(self):
+        from contextlib import closing
+        path = self.root / "annual.db"
+        init_database(path, fixture_path=self.fixture_path)
+        with closing(sqlite3.connect(path)) as connection:
+            for sql in ("UPDATE payroll_tax_bases SET pensionable_earnings_cents = 1",
+                        "DELETE FROM payroll_tax_bases"):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    connection.execute(sql)
+            connection.rollback()
+        before = path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            init_database(path, fixture_path=self.fixture_path)
+        self.assertEqual(before, path.read_bytes())
+
+
 class EmployeeDatabaseTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

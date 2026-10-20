@@ -25,6 +25,9 @@ from index_documents import ROOT
 from search_documents import search_documents
 from init_employee_db import DEFAULT_DB
 from payroll_mcp_client import PayrollMCPClient, PayrollMCPError
+from payroll_calculation_workflow import calculation_turn, should_route as calculation_route, explicit_request as explicit_calculation, SESSION_KEY
+from employee_analytics_workflow import analytics_turn, should_route as analytics_route, SESSION_KEY as ANALYTICS_KEY
+from t4_workflow import t4_turn, should_route as t4_route, SESSION_KEY as T4_KEY
 
 
 DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
@@ -38,6 +41,8 @@ CAPABILITIES = {
     "document_search": True,
     "conversation_and_payroll_intake": True,
     "employee_records": False,
+    "employee_analytics": False,
+    "t4_sample_breakdown": False,
     "company_payroll_calendar": False,
     "payroll_calculation": False,
     "compensation_requests": False,
@@ -242,7 +247,25 @@ def payment_date_violation(text: str, payment_date: str | None) -> str | None:
     return None
 
 
-def year_selection_violation(text: str, payment_date: str | None) -> str | None:
+def t4_reporting_year(question: str) -> int | None:
+    """Extract an explicit T4 information-checklist year, never generation authority."""
+    if (not re.search(r"\bT4\b", question, re.I) or not re.search(
+            r"\b(?:information|records|documents|details|inputs|checklist|needed|required|requirements|need)\b", question, re.I)):
+        return None
+    year = r"((?:19|20)\d{2})"
+    patterns = (
+        r"\bT4\b[^.!?\n]{0,120}\bfor\s+(?:the\s+)?(?:(?:tax|calendar|reporting)\s+year\s+)?" + year + r"\b",
+        r"\b" + year + r"\s+(?:(?:tax|calendar|reporting)\s+year\s+)?T4\b",
+        r"\bfor\s+(?:the\s+)?(?:(?:tax|calendar|reporting)\s+year\s+)?" + year + r"\b[^.!?\n]{0,120}\bT4\b",
+        r"\bT4\b[^.!?\n]{0,120}\b(?:tax|calendar|reporting)\s+year\s+" + year + r"\b",
+    )
+    years = {int(value) for pattern in patterns for value in re.findall(pattern, question, re.I)}
+    # Multiple stated years are ambiguous; never choose one implicitly.
+    all_years = {int(value) for value in re.findall(r"\b(?:19|20)\d{2}\b", question)}
+    return next(iter(years)) if len(years) == 1 and len(all_years) == 1 else None
+
+
+def year_selection_violation(text: str, payment_date: str | None, *, reporting_year: int | None = None) -> str | None:
     """Catch observed tax-year selection, while allowing edition descriptions and examples."""
     if payment_date is not None:
         return None
@@ -254,10 +277,22 @@ def year_selection_violation(text: str, payment_date: str | None) -> str | None:
         r"\b(?:applicable|correct|appropriate|use|using|retrieve|search|explain|select)\b"
         r"[^.!?\n]{0,100}\b" + year + r"\b[^.!?\n]{0,65}\b" + guidance + r"\b|"
         r"\b" + year + r"\b[^.!?\n]{0,65}\b" + guidance
-        + r"\b[^.!?\n]{0,50}\b(?:apply to you|for your pay|will be used)\b|"
-        r"\b(?:year.to.date|YTD|withheld|so far)\b[^.!?\n]{0,90}\b" + year + r"\b"
+        + r"\b[^.!?\n]{0,50}\b(?:apply to you|for your pay|will be used)\b"
     )
-    if re.search(selection, text, re.IGNORECASE):
+    selected_rates = bool(re.search(selection, text, re.IGNORECASE))
+    unconfirmed_totals = False
+    for sentence in re.split(r"[.!?\n]", text):
+        matches = re.findall(r"\b(?:year.to.date|YTD|withheld|so far)\b[^.!?\n]{0,90}\b((?:19|20)\d{2})\b", sentence, re.I)
+        if not matches:
+            continue
+        if reporting_year is None or any(int(value) != reporting_year for value in matches):
+            unconfirmed_totals = True
+        elif re.search(r"\b(?:year.to.date|YTD|so far)\b", sentence, re.I) and not re.search(
+                r"\b(?:full.year|full calendar.year|complete calendar.year|complete annual|entire calendar.year)\b", sentence, re.I):
+            return "A T4 checklist requires complete calendar-year totals for the user-requested reporting year; partial YTD records cannot establish annual T4 amounts"
+        elif re.search(r"\b(?:paycheck|paycheque|pay[ -]period|next pay|this payment)\b", sentence, re.I):
+            unconfirmed_totals = True
+    if selected_rates or unconfirmed_totals:
         return "Payment date is missing; do not select a tax year, promise a year's applicable tables, or request year-specific YTD amounts. Ask for YYYY-MM-DD first; a named edition can be described without asserting applicability"
     return None
 
@@ -443,6 +478,7 @@ class AgentState(TypedDict):
     correction_attempts: int
     payment_date: str | None
     payment_date_status: str
+    reporting_year: int | None
     requested_documents: dict[str, list[str]]
     calculation_limit_disclosed: bool
     requested_confirmations: dict[str, str]
@@ -455,7 +491,7 @@ class AgentState(TypedDict):
 
 def system_prompt(capabilities: dict | None = None) -> str:
     skill = (ROOT / "skills/ontario-payroll/SKILL.md").read_text(encoding="utf-8")
-    return f"""You assist an Ontario payroll specialist. Ask for the payment date when applicability depends on it; do not infer the applicable year.
+    prompt = f"""You assist an Ontario payroll specialist. Ask for the payment date when applicability depends on it; do not infer the applicable year.
 Follow this payroll skill:
 {skill}
 
@@ -465,9 +501,24 @@ Runtime capability inventory (true means available):
 The skill describes the eventual product; the runtime inventory determines what
 you can do NOW. Missing user details cannot enable a disconnected capability.
 Do not invent access or perform payroll arithmetic yourself.
+A user-requested T4 reporting year is separate from a payroll payment date.
+For a checklist of information needed to prepare an employee's T4 for an explicit
+year, use that requested year without asking for a paycheck date. Explain required
+complete calendar-year records; do not calculate, generate or file the employee's
+T4, or claim that partial history establishes annual totals. This does not establish
+which guide edition applies to that reporting year: edition coverage still needs
+explicit retrieved evidence. Payroll rate/table selection still needs a payment date.
 Do not provide numeric gross pay per period, estimated payroll deductions, or
 net pay, even as an illustration or alongside a disclaimer. Repeating the user's
 annual salary is allowed; deriving new payroll amounts requires a calculation tool.
+The document response validator also rejects ALL other new currency amounts,
+including source-quoted reporting thresholds, penalties, sample amounts and
+illustrations. Do not add those figures while explaining guidance; explain them
+qualitatively. This restriction applies to answer, clarification and correction.
+For a general definition such as "What is T4?", give a brief definition and its
+purpose, supported by current-turn citations. Omit unrelated monetary examples,
+filing thresholds and detailed rules the user did not ask about. A general
+definition does not require the user's salary, identity or payment date.
 When the user explicitly names a CRA publication, search and cite that publication.
 Never silently substitute a different guide. If it is unavailable, say so.
 When effective dates are incomplete, do not say an edition would ordinarily govern
@@ -482,6 +533,10 @@ State a reporting year only when a cited passage explicitly establishes that cov
 STATUS AND CAPABILITY RULES:
 - Employee tools run in a separate, deterministic graph node. This document node
   has no employee evidence and must never invent employee facts or cite database IDs.
+  A separate workforce node supports recorded active headcounts and paginated
+  active employee rosters through MCP. Do not tell users that all employee names
+  must be supplied to request a roster. Departments and locations are not stored;
+  do not suggest those as available record filters or invent tool capabilities.
   If asked here about employee-specific payday, employee lookups, company schedules or compensation
   requests, call submit_response(status="unsupported", citations=[])
   and explain the missing connection. Do not ask for an employee ID or more personal
@@ -551,6 +606,13 @@ write URLs yourself; the application attaches source links and PDF pages.
 Clarification must ask a specific question; unsupported must explain the gap.
 Never include hidden reasoning.
 """
+    if capabilities and capabilities.get("payroll_calculation"):
+        prompt = prompt.replace("payroll calculation is not implemented\n  in this prototype",
+                                "this document node cannot execute payroll calculations; the separate calculation workflow is available")
+        prompt = prompt.replace("unavailable calculation tool", "calculation tool outside this document node")
+    if capabilities and capabilities.get("t4_sample_breakdown"):
+        prompt += "\nA separate T4 workflow supports reconciled SAMPLE annual breakdowns by employee and explicit reporting year. It does not generate forms or file actual T4s. Do not claim all annual sample data is unavailable merely because the document node cannot access it; distinguish this from the partial ordinary payroll-history tool. General T4 guidance still requires document evidence.\n"
+    return prompt
 
 
 def employee_name(question: str) -> str | None:
@@ -695,7 +757,8 @@ def employee_record_text(action: str, result: dict, identity: dict) -> str:
 
 
 def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *, diagnostics: bool = False,
-                route_intake: bool = True, employee_client: PayrollMCPClient | None = None):
+                route_intake: bool = True, employee_client: PayrollMCPClient | None = None,
+                enable_calculation: bool = False):
     """Compile explicit nodes; dependencies can be replaced for offline tests."""
     search_tool = StructuredTool.from_function(
         func=retriever, name=TOOL_NAME, args_schema=SearchArguments,
@@ -705,10 +768,16 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
 
     def capabilities() -> dict:
         available = bool(employee_client and employee_client.available)
-        return {**CAPABILITIES, "employee_records": available, "company_payroll_calendar": available, "mcp_transport": available}
+        return {**CAPABILITIES, "employee_records": available, "company_payroll_calendar": available,
+                "mcp_transport": available, "payroll_calculation": enable_calculation, "employee_analytics": available,
+                "t4_sample_breakdown": available}
 
     async def employee_node(state: AgentState) -> dict:
         session = deepcopy(state["employee_session"])
+        # A lookup may change the employee or effective date; never retain a
+        # previously prepared calculation across that context switch.
+        session.pop(SESSION_KEY, None)
+        session.pop(ANALYTICS_KEY, None)
         question = str(state["messages"][-1].content)
         action, target = employee_request(question, session)
         trace, sources = list(state["trace"]), []
@@ -821,6 +890,8 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
             + "\nREQUIRED USER CONFIRMATIONS: " + json.dumps(state["requested_confirmations"])
             + "\nUse only these document IDs when publications are requested. An empty ID list means unavailable; do not substitute."
             + "\n\nUSER PAYMENT DATE CONTEXT: " + json.dumps(date_context)
+            + "\nUSER-REQUESTED T4 REPORTING YEAR: " + json.dumps(state["reporting_year"])
+            + "\nThis reporting year scopes a T4 information checklist only. It is not a payment date, table applicability, or verified annual employee data."
             + "\nThis context is derived only from user messages, never from retrieved documents. "
               "If payment_date is null, ask for it before date-sensitive intake or table selection. "
               "For general definitions, explain evidence limitations without requiring an irrelevant date. "
@@ -978,7 +1049,7 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
             violation = payment_date_violation(text, state["payment_date"])
             if violation:
                 raise ValueError(violation)
-            violation = year_selection_violation(text, state["payment_date"])
+            violation = year_selection_violation(text, state["payment_date"], reporting_year=state["reporting_year"])
             if violation:
                 raise ValueError(violation)
             if any(source_applicability(state["evidence"][key], state["payment_date"])
@@ -996,6 +1067,12 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
             else:
                 reason = str(error)
             validation = {"event": "response_validation", "status": "rejected", "reason": reason}
+            if isinstance(last, AIMessage) and not last.tool_calls:
+                # A format error must not hide a second, observable content
+                # problem until the only correction opportunity has been spent.
+                amount_issue = unbacked_amount_violation(last.text, state["intake_context"])
+                if amount_issue:
+                    validation["additional_reason"] = amount_issue
             if diagnostics and isinstance(last, AIMessage):
                 diagnostic = rejected_draft_diagnostic(last)
                 if diagnostic is not None:
@@ -1035,8 +1112,10 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
         """Return local validation feedback, not a guessed replacement answer."""
         attempt = state["correction_attempts"] + 1
         reason = state["trace"][-1]["reason"]
+        additional_reason = state["trace"][-1].get("additional_reason")
         feedback = (
             f"Application validation feedback: {reason}. Your previous response was rejected. "
+            + (f"Also correct this content issue: {additional_reason}. " if additional_reason else "") +
             f"To finish this original user request, call {SUBMIT_NAME} alone, with exactly "
             "status (answer, clarification, or unsupported), text (a nonempty string), "
             "and citations (a list of source ID strings). If function calling is unavailable, "
@@ -1059,6 +1138,11 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
             "When already disclosed, a short follow-up need not repeat it; otherwise disclose it. "
             "Do not include any derived gross pay per period, estimated deductions, or net pay, "
             "even alongside a disclaimer. You may confirm the supplied annual salary and pay "
+            "frequency, but introduce NO other currency figures, including source-quoted thresholds, "
+            "penalties or monetary examples. This applies even to general document definitions. "
+            "Correct the content as well as the format; do not add new monetary detail during repair. "
+            "For a definition question, provide a brief cited definition and purpose without "
+            "unrequested thresholds or examples. You may retain the supplied pay "
             "frequency without doing arithmetic. Do not attribute statements or dates to the "
             "user unless the user actually supplied them. "
             f"The user-provided payment date is {state['payment_date'] or 'missing'} "
@@ -1068,6 +1152,10 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
             "or year-to-date amounts. Incomplete source dates cannot establish that tables "
             "apply to a written date such as 'your November 13, 2026 payment date'. "
             f"Available source IDs: {json.dumps(list(state['evidence']))}. "
+            f"The user-requested T4 reporting year is {state['reporting_year']}. When provided, "
+            "a T4 information checklist may request complete calendar-year totals for that year "
+            "without a paycheck date. Do not confuse that reporting year with payment-date selection, "
+            "applicable tax tables, guide-edition coverage, or actual verified employee T4 amounts. "
             "Do not invent citation IDs or URLs. This is your only correction opportunity; "
             "the original model-call and search limits still apply."
         )
@@ -1092,17 +1180,55 @@ def build_agent(model: Any, retriever: Callable[..., dict] = search_documents, *
     graph.add_node("finish", finish_node)
     graph.add_node("correct", correction_node)
     graph.add_node("employee", employee_node)
-    graph.add_node("prepare", lambda state: {"capabilities": capabilities()})
+    def calculation_node(state):
+        session = deepcopy(state["employee_session"])
+        session.pop(ANALYTICS_KEY, None)
+        return calculation_turn(model, str(state["messages"][-1].content), session)
+
+    graph.add_node("calculation", calculation_node)
+    async def workforce_node(state):
+        return await analytics_turn(employee_client, str(state["messages"][-1].content), state["employee_session"])
+
+    graph.add_node("workforce", workforce_node)
+    async def t4_node(state):
+        return await t4_turn(employee_client, str(state["messages"][-1].content), state["employee_session"])
+
+    graph.add_node("t4", t4_node)
+    def prepare_node(state):
+        session = deepcopy(state["employee_session"])
+        question = str(state["messages"][-1].content)
+        if not t4_route(question, session):
+            session.pop(T4_KEY, None)
+        if (enable_calculation and not calculation_route(question, session)
+                and state["intake_route"] not in {"salary", "calculation"}):
+            # Returning to guidance requires a fresh review before a later
+            # confirmation; intervening text cannot leave an old approval live.
+            session.get(SESSION_KEY, {}).pop("awaiting_confirmation", None)
+        return {"capabilities": capabilities(), "employee_session": session}
+
+    graph.add_node("prepare", prepare_node)
 
     def start_route(state):
-        if employee_client is not None and employee_request(str(state["messages"][-1].content), state["employee_session"])[0]:
+        question = str(state["messages"][-1].content)
+        if t4_route(question, state["employee_session"]):
+            return "t4"
+        if analytics_route(question, state["employee_session"]):
+            return "workforce"
+        if enable_calculation and (explicit_calculation(question) or calculation_route(question, state["employee_session"])):
+            return "calculation"
+        if employee_client is not None and employee_request(question, state["employee_session"])[0]:
             return "employee"
+        if enable_calculation and state["intake_route"] in {"salary", "calculation"}:
+            return "calculation"
         return "intake" if route_intake and state["intake_route"] else "model"
 
     graph.add_edge(START, "prepare")
     graph.add_conditional_edges("prepare", start_route,
-                                {"intake": "intake", "model": "model", "employee": "employee"})
+                                {"intake": "intake", "model": "model", "employee": "employee", "calculation": "calculation", "workforce": "workforce", "t4": "t4"})
     graph.add_edge("employee", END)
+    graph.add_edge("calculation", END)
+    graph.add_edge("workforce", END)
+    graph.add_edge("t4", END)
     graph.add_edge("intake", "finish")
     graph.add_conditional_edges("model", route_model, {"tools": "tools", "finish": "finish"})
     graph.add_conditional_edges("tools", route_tools, {"model": "model", "finish": "finish"})
@@ -1129,6 +1255,7 @@ def turn_input(question: str, history: list[BaseMessage] | None = None, employee
         "messages": [*recent, HumanMessage(content=question)],
         "model_calls": 0, "searches": 0, "correction_attempts": 0,
         "payment_date": context["date"], "payment_date_status": context["status"],
+        "reporting_year": t4_reporting_year(question),
         "requested_documents": requested_documents(question),
         "calculation_limit_disclosed": calculation_limit_disclosed(recent),
         "requested_confirmations": requested_confirmations([*(history or []), HumanMessage(content=question)], question, context["date"]),
@@ -1162,6 +1289,15 @@ def create_model() -> ChatPerplexity:
 def render_answer(outcome: dict) -> str:
     text = outcome["text"]
     for source in outcome["sources"]:
+        if source.get("kind") in {"workforce_summary", "employee_roster", "annual_payroll_sample"}:
+            text += f"\n\n[{source['source_id']}] Read-only database summary via {source['tool']}; snapshot {source['provenance']['dataset_snapshot_date']}."
+            continue
+        if source.get("kind") == "calculation":
+            provenance = source["provenance"]
+            text += f"\n\n[{source['source_id']}] {provenance['ruleset_id']}; rules SHA-256 {provenance['rules_sha256']}."
+            for item in provenance["sources"]:
+                text += "\n" + item["url"]
+            continue
         if source.get("kind") == "employee_record":
             text += f"\n\n[{source['source_id']}] Local fictional database via {source['tool']}; employee {source['employee_id']}."
             continue
@@ -1173,8 +1309,8 @@ def render_answer(outcome: dict) -> str:
 async def chat(args) -> int:
     history: list[BaseMessage] = []
     session = {}
-    async with (nullcontext(None) if args.no_mcp else PayrollMCPClient(args.db)) as client:
-        graph = build_agent(create_model(), employee_client=None if args.no_mcp else client)
+    async with (nullcontext(None) if args.no_mcp else PayrollMCPClient(args.db, annual_db_path=getattr(args, "annual_db", None))) as client:
+        graph = build_agent(create_model(), employee_client=None if args.no_mcp else client, enable_calculation=True)
         while True:
             question = args.question if args.question is not None else input("\nYou (exit to quit, reset to clear): ").strip()
             if args.question is None and question.lower() in ("exit", "quit"):
@@ -1205,6 +1341,7 @@ def main() -> int:
     parser.add_argument("question", nargs="?", help="Omit to start a terminal conversation")
     parser.add_argument("--trace", action="store_true", help="Show model/tool activity without hidden reasoning")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Existing fictional employee database")
+    parser.add_argument("--annual-db", type=Path, default=ROOT / "data/payroll_t4_2026.db", help="Separate annual sample database for T4 breakdowns")
     parser.add_argument("--no-mcp", action="store_true", help="Use the document-only workflow")
     args = parser.parse_args()
     try:

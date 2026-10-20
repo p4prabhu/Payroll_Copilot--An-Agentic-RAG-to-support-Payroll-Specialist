@@ -21,6 +21,121 @@ def result(text="Stored salary: CAD $50,000.00", *, session=None, sources=None, 
 
 
 class PayrollUITests(unittest.TestCase):
+    def test_exact_t4_question_shows_box_table_sample_source_and_missing_filing_data(self):
+        from init_employee_db import FIXTURE_PATH
+        with tempfile.TemporaryDirectory() as directory:
+            path, annual = Path(directory) / "records.db", Path(directory) / "annual.db"
+            init_database(path)
+            init_database(annual, fixture_path=FIXTURE_PATH.with_name("fixtures_t4_2026.json"))
+            no_model = Mock(side_effect=AssertionError("T4 breakdown must not initialize a paid model"))
+            with patch("payroll_ui_runtime.run_ui_turn", side_effect=partial(run_ui_turn, db_path=path, annual_db_path=annual, model_factory=no_model)):
+                app = self.app()
+                app.chat_input[0].set_value("Show Alex Morgan’s sample T4 breakdown for 2026").run()
+                self.assertFalse(app.exception)
+                latest = app.session_state["chat_messages"][-1]["outcome"]
+                self.assertEqual(latest["status"], "answer")
+                self.assertEqual(latest["t4_summary"]["box_candidates_cents"]["14"], 5000008)
+                self.assertTrue(any(s.value == "Sample T4 breakdown" for s in app.subheader))
+                self.assertTrue(any("| 14 | Employment income" in m.value and "50,000.08" in m.value for m in app.markdown))
+                self.assertTrue(any("Annual payroll sample" in m.value for m in app.markdown))
+                self.assertIn("employee SIN", latest["text"])
+                self.assertIn("not an actual T4", latest["text"])
+                next(b for b in app.button if b.label == "Reset conversation").click().run()
+                self.assertEqual(app.session_state["employee_session"], {})
+            no_model.assert_not_called()
+
+    def test_exact_roster_followup_shows_table_and_database_source_without_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ui roster.db"
+            init_database(path)
+            no_model = Mock(side_effect=AssertionError("Roster must not initialize paid models"))
+            with patch("payroll_ui_runtime.run_ui_turn", side_effect=partial(run_ui_turn, db_path=path, model_factory=no_model)):
+                app = self.app()
+                app.chat_input[0].set_value("How many employees as of 2026-10-19?").run()
+                app.chat_input[0].set_value("give me the details of all the employee").run()
+                self.assertFalse(app.exception)
+                latest = app.session_state["chat_messages"][-1]["outcome"]
+                self.assertEqual(latest["roster"]["match_count"], 4)
+                self.assertIn("Priya Shah", latest["text"])
+                self.assertIn("$75,000.00", latest["text"])
+                self.assertTrue(any("Employee database roster" in m.value for m in app.markdown))
+                self.assertTrue(next(b for b in app.button if b.label == "Next employees").disabled)
+                self.assertTrue(next(b for b in app.button if b.label == "Previous employees").disabled)
+            no_model.assert_not_called()
+
+    def test_roster_pagination_buttons_send_commands_and_reset_clears_controls(self):
+        from employee_repository import EmployeeRepository
+        from employee_analytics_workflow import render_roster
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pages.db"
+            init_database(path)
+            repository = EmployeeRepository(path)
+            outputs = []
+            for offset in (0, 2):
+                page = repository.list_employees("2026-10-19", limit=2, offset=offset)
+                args = {"as_of_date": "2026-10-19", "limit": 2, "offset": offset}
+                session = {"_analytics": {"kind": "roster", "arguments": args, "page_ready": True,
+                                          "has_more": page["has_more"], "next_offset": page["next_offset"]}}
+                sources = [{"source_id": "D1", "kind": "employee_roster", "tool": "list_employees", "arguments": args, "provenance": page["provenance"]}]
+                output = result(render_roster(page), session=session, sources=sources)
+                output["outcome"]["roster"] = page
+                outputs.append(output)
+            with patch("payroll_ui_runtime.run_ui_turn", side_effect=[outputs[0], outputs[1], outputs[0]]) as run:
+                app = self.app()
+                app.chat_input[0].set_value("List all employees as of 2026-10-19").run()
+                next(b for b in app.button if b.label == "Next employees").click().run()
+                self.assertFalse(app.exception)
+                self.assertEqual(run.call_args.args[0], "Next employees")
+                self.assertEqual(app.session_state["chat_messages"][-1]["outcome"]["roster"]["offset"], 2)
+                next(b for b in app.button if b.label == "Previous employees").click().run()
+                self.assertEqual(run.call_args.args[0], "Previous employees")
+                next(b for b in app.button if b.label == "Reset conversation").click().run()
+                self.assertFalse(any(b.label == "Next employees" for b in app.button))
+                self.assertEqual(app.session_state["employee_session"], {})
+    def test_real_workforce_count_and_followup_render_sources_without_paid_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ui workforce.db"
+            init_database(path)
+            no_model = Mock(side_effect=AssertionError("Workforce queries must not initialize a paid model"))
+            with patch("payroll_ui_runtime.run_ui_turn", side_effect=partial(run_ui_turn, db_path=path, model_factory=no_model)):
+                app = self.app()
+                app.chat_input[0].set_value("How many employees are active?").run()
+                self.assertFalse(app.exception)
+                app.chat_input[0].set_value("2026-11-01").run()
+                self.assertFalse(app.exception)
+                self.assertTrue(any(s.value == "Workforce summary" for s in app.subheader))
+                self.assertIn("**4 active employees**", app.session_state["chat_messages"][-1]["content"])
+                self.assertTrue(any("Employee database summary" in m.value for m in app.markdown))
+                next(b for b in app.button if b.label == "Reset conversation").click().run()
+                self.assertEqual(app.session_state["employee_session"], {})
+            no_model.assert_not_called()
+    def test_calculation_confirmation_buttons_result_sources_and_reset(self):
+        import json
+        from payroll_calculation_workflow import calculation_turn
+        payload = json.loads((ROOT / "tests/fixtures/payroll_reference_cases.json").read_text(encoding="utf-8"))["cases"][0]["input"]
+        ready = calculation_turn(Mock(), "Calculate payroll: " + json.dumps(payload), {})
+        ready["capabilities"] = {"payroll_calculation": True, "mcp_transport": False}
+        calculated = calculation_turn(Mock(), "Confirm calculation", ready["employee_session"])
+        calculated["capabilities"] = ready["capabilities"]
+        with patch("payroll_ui_runtime.run_ui_turn", side_effect=[ready, calculated]) as run:
+            app = self.app()
+            app.chat_input[0].set_value("Calculate payroll").run()
+            self.assertFalse(app.exception)
+            next(b for b in app.button if b.label == "Confirm calculation").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(run.call_args.args[0], "Confirm calculation")
+            self.assertIn("1,544.03", app.session_state["chat_messages"][-1]["content"])
+            self.assertEqual([(m.label, m.value) for m in app.metric],
+                             [("Net pay", "$1,544.03"), ("Gross pay", "$1,923.08"), ("Total deductions", "$379.05")])
+            table = next(m.value for m in app.markdown if "| Deduction | CAD |" in m.value)
+            for row in ("Federal income tax | \\$153.28", "Ontario income tax | \\$88.01", "CPP | \\$106.41", "CPP2 | \\$0.00", "EI | \\$31.35"):
+                self.assertIn(row, table)
+            self.assertTrue(any(e.label == "Calculation details" for e in app.expander))
+            self.assertTrue(any("Payroll calculation rules" in m.value for m in app.markdown))
+            self.assertFalse(any(b.label == "Confirm calculation" for b in app.button))
+            next(b for b in app.button if b.label == "Reset conversation").click().run()
+            self.assertEqual(app.session_state["employee_session"], {})
+
     def app(self):
         return AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
 
@@ -59,6 +174,45 @@ class PayrollUITests(unittest.TestCase):
         self.assertEqual(app.session_state["chat_messages"][-1]["outcome"]["text"], "Fictional database record")
         self.assertTrue(any("PDF page 18" in c.value for c in app.caption))
         self.assertTrue(any(e.label == "Tool activity" for e in app.expander))
+
+    def test_review_notices_are_compact_but_full_text_and_history_are_preserved(self):
+        notes = ["Source content review is pending internally within this project; this answer is provisional.",
+                 "Some cited editions need internal project update review; current applicability has not been verified.",
+                 "Some cited sources have unknown or incomplete effective dates; payment-date applicability remains unresolved."]
+        body = "A T4 summarizes employment income and deductions.\n\n**What it includes**\n\n- Salary\n- Income tax, CPP and EI"
+        text = body + "\n\n" + "\n".join(notes)
+        with patch("payroll_ui_runtime.run_ui_turn", return_value=result(text)):
+            app = self.app()
+            app.chat_input[0].set_value("What is T4?").run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any(m.value == body for m in app.markdown))
+        self.assertTrue(any("Provisional guidance" in m.value for m in app.markdown))
+        self.assertTrue(any(e.label == "Review notes" for e in app.expander))
+        for note in notes:
+            self.assertTrue(any(c.value == note for c in app.caption))
+        self.assertEqual(app.session_state["chat_messages"][-1]["content"], text)
+        self.assertEqual(app.session_state["chat_messages"][-1]["outcome"]["text"], text)
+
+    def test_substantive_limitations_stay_in_answer_and_dynamic_text_is_not_html(self):
+        text = "Employee history is incomplete. Do not use it as a complete YTD total.\n\n<script>UI_SENTINEL</script>"
+        with patch("payroll_ui_runtime.run_ui_turn", return_value=result(text)):
+            app = self.app()
+            app.chat_input[0].set_value("Show history").run()
+        self.assertFalse(app.exception)
+        body = next(m for m in app.markdown if "UI_SENTINEL" in m.value)
+        self.assertIn("Do not use it as a complete YTD total", body.value)
+        self.assertFalse(body.proto.allow_html)
+
+    def test_repeated_pdf_sources_keep_distinct_citations_and_links(self):
+        sources = [{"source_id": "S1", "title": "T4 guide", "pdf_page_number": 2, "source_url": "https://www.canada.ca/test.pdf"},
+                   {"source_id": "S2", "title": "T4 guide", "pdf_page_number": 7, "source_url": "https://www.canada.ca/test.pdf"}]
+        with patch("payroll_ui_runtime.run_ui_turn", return_value=result("T4 guidance [S1] [S2]", sources=sources)):
+            app = self.app()
+            app.chat_input[0].set_value("What is T4?").run()
+        self.assertFalse(app.exception)
+        for source_id in ("S1", "S2"):
+            self.assertTrue(any(f"[{source_id}] T4 guide" in m.value for m in app.markdown))
+        self.assertTrue(any(e.label == "Sources · 2" for e in app.expander))
 
     def test_failure_preserves_conversation_and_never_displays_exception_secrets(self):
         with patch("payroll_ui_runtime.run_ui_turn", side_effect=[result(), RuntimeError("secret-api-key")]) as run:

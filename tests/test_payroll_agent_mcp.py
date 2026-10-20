@@ -17,6 +17,77 @@ from test_payroll_agent import FakeModel, call, evidence, final
 
 
 class PayrollAgentMCPTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_t4_question_and_selection_bypass_document_model_and_payment_date_guards(self):
+        from init_employee_db import FIXTURE_PATH
+        annual = self.path.with_name("annual.db")
+        init_database(annual, fixture_path=FIXTURE_PATH.with_name("fixtures_t4_2026.json"))
+        client = await self.enterAsyncContext(PayrollMCPClient(transport=create_server(self.path, annual)))
+        model = FakeModel([])
+        graph = build_agent(model, employee_client=client, enable_calculation=True)
+        state = await arun_turn(graph, "Show Alex Morgan’s sample T4 breakdown for 2026")
+        self.assertEqual(state["outcome"]["status"], "answer")
+        self.assertEqual(state["model_calls"], 0)
+        self.assertEqual(state["searches"], 0)
+        self.assertIsNone(state["payment_date"])
+        self.assertIn("$50,000.08", render_answer(state["outcome"]))
+        self.assertTrue(state["capabilities"]["t4_sample_breakdown"])
+        first = await arun_turn(graph, "Give a T4 breakdown of Alex for 2026")
+        self.assertEqual(first["outcome"]["status"], "clarification")
+        chosen = await arun_turn(graph, "EMP-1004", employee_session=first["employee_session"])
+        self.assertEqual(chosen["outcome"]["t4_summary"]["employee"]["family_name"], "Chen")
+        self.assertEqual(model.seen, [])
+
+    async def test_intervening_employee_question_clears_pending_t4_context(self):
+        model = FakeModel([])
+        graph = build_agent(model, employee_client=await self.client())
+        first = await arun_turn(graph, "Generate T4 for Alex Morgan")
+        self.assertIn("_t4", first["employee_session"])
+        switched = await arun_turn(graph, "Find Priya as of 2026-10-20", employee_session=first["employee_session"])
+        self.assertNotIn("_t4", switched["employee_session"])
+        self.assertEqual(switched["employee_session"]["selected"]["family_name"], "Shah")
+
+    async def test_exact_all_employee_details_followup_uses_roster_node_and_retains_date(self):
+        model = FakeModel([])
+        graph = build_agent(model, employee_client=await self.client(), enable_calculation=True)
+        counted = await arun_turn(graph, "How many employees are there as of 2026-10-19?")
+        listed = await arun_turn(graph, "give me the details of all the employee", employee_session=counted["employee_session"])
+        self.assertEqual(listed["outcome"]["status"], "answer")
+        self.assertEqual(listed["outcome"]["roster"]["as_of_date"], "2026-10-19")
+        self.assertEqual(listed["outcome"]["roster"]["match_count"], 4)
+        self.assertIn("$75,000.00", listed["outcome"]["text"])
+        self.assertNotIn("PDF page", render_answer(listed["outcome"]))
+        self.assertEqual(model.seen, [])
+        self.assertEqual(listed["model_calls"], 0)
+    async def test_workforce_questions_use_summary_node_without_model_or_employee_selection(self):
+        model = FakeModel([])
+        graph = build_agent(model, employee_client=await self.client(), enable_calculation=True)
+        first = await arun_turn(graph, "How many employees are active as of a given date?")
+        self.assertEqual(first["outcome"]["status"], "clarification")
+        second = await arun_turn(graph, "2026-11-01", employee_session=first["employee_session"])
+        self.assertIn("**4 active employees**", second["outcome"]["text"])
+        self.assertTrue(second["capabilities"]["employee_analytics"])
+        self.assertIn("Read-only database summary", render_answer(second["outcome"]))
+        self.assertNotIn("selected", second["employee_session"])
+        self.assertEqual(second["model_calls"], 0)
+        self.assertEqual(model.seen, [])
+        lookup = await arun_turn(graph, "Find Priya as of 2026-11-01", employee_session=second["employee_session"])
+        self.assertNotIn("_analytics", lookup["employee_session"])
+
+    async def test_employee_lookup_clears_ready_calculation_and_partial_history_is_not_used(self):
+        import json
+        payload = json.loads((Path(__file__).parent / "fixtures/payroll_reference_cases.json").read_text(encoding="utf-8"))["cases"][0]["input"]
+        model = FakeModel([])
+        graph = build_agent(model, employee_client=await self.client(), enable_calculation=True)
+        ready = await arun_turn(graph, "Calculate payroll: " + json.dumps(payload))
+        self.assertTrue(ready["employee_session"]["_calculation"]["awaiting_confirmation"])
+        lookup = await arun_turn(graph, "Find Priya as of 2026-11-01", employee_session=ready["employee_session"])
+        self.assertNotIn("_calculation", lookup["employee_session"])
+        confirmation = await arun_turn(graph, "Confirm calculation", employee_session=lookup["employee_session"])
+        self.assertNotIn("calculation", confirmation["outcome"])
+        incomplete = await arun_turn(graph, 'Calculate payroll: {"annual_salary":"80000.00"}', employee_session=lookup["employee_session"])
+        self.assertNotIn("ytd.cpp", incomplete["employee_session"]["_calculation"]["values"])
+        self.assertEqual(model.seen, [])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

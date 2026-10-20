@@ -1,6 +1,7 @@
 """Read-only employee tool semantics and effective-date boundaries."""
 
 from pathlib import Path
+from contextlib import closing
 import sqlite3
 import sys
 import tempfile
@@ -11,7 +12,157 @@ from employee_repository import EmployeeRepository, RepositoryError
 from init_employee_db import init_database
 
 
+class AnnualPayrollRepositoryTests(unittest.TestCase):
+    def setUp(self):
+        from init_employee_db import FIXTURE_PATH
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "annual.db"
+        init_database(self.path, fixture_path=FIXTURE_PATH.with_name("fixtures_t4_2026.json"))
+        self.repository = EmployeeRepository(self.path)
+
+    def test_all_employees_reconcile_and_reads_preserve_database(self):
+        before = self.path.read_bytes()
+        for number, expected_count in enumerate((26, 26, 12, 12, 21), 1):
+            with self.subTest(employee=number):
+                result = self.repository.get_annual_payroll_summary(f"emp-{number:03d}", 2026)
+                self.assertEqual(result["status"], "ok")
+                self.assertTrue(result["ready_for_sample_breakdown"])
+                self.assertTrue(result["is_complete_calendar_year"])
+                self.assertFalse(result["ready_for_filing"])
+                self.assertEqual(result["dataset_kind"], "simulated_year_end")
+                self.assertEqual(result["totals"]["payment_count"], expected_count)
+                boxes, totals = result["box_candidates_cents"], result["totals"]
+                self.assertEqual(boxes["14"], totals["employment_income_cents"])
+                self.assertEqual(sum(boxes[key] for key in ("16", "16A", "18", "22")), totals["total_deductions_cents"])
+                self.assertEqual(boxes["14"] - totals["total_deductions_cents"], totals["net_pay_cents"])
+                self.assertIn("employee SIN", result["missing_filing_information"])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_priya_salary_change_contribution_caps_and_departed_sam(self):
+        priya = self.repository.get_annual_payroll_summary("emp-002", 2026)
+        self.assertEqual(priya["box_candidates_cents"]["14"], 22 * 288462 + 4 * 307692)
+        self.assertEqual(priya["box_candidates_cents"]["24"], 6890000)
+        self.assertGreater(priya["box_candidates_cents"]["16A"], 0)
+        self.assertEqual(priya["box_candidates_cents"]["16"], 423045)
+        self.assertEqual(priya["box_candidates_cents"]["18"], 112307)
+        sam = self.repository.get_annual_payroll_summary("emp-005", 2026)
+        self.assertEqual(sam["box_candidates_cents"]["14"], 21 * 153846)
+        self.assertEqual(sam["totals"]["payment_count"], 21)
+        with closing(sqlite3.connect(self.path)) as connection:
+            last = connection.execute("SELECT MAX(payment_date) FROM payroll_history WHERE employee_id = 'emp-005'").fetchone()[0]
+            self.assertEqual(last, "2026-10-16")
+
+    def test_known_first_pay_and_per_period_rounding_are_preserved(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            rows = dict(connection.execute("SELECT code, amount_cents FROM payroll_lines WHERE payment_id = 'sample-emp-001-01'"))
+        self.assertEqual(rows, {"SALARY": 192308, "FED_TAX": 15328, "ON_TAX": 8801, "CPP": 10641, "CPP2": 0, "EI": 3135})
+        result = self.repository.get_annual_payroll_summary("emp-001", 2026)
+        self.assertEqual(result["box_candidates_cents"]["14"], 5000008)
+        self.assertIn("without annual salary true-up", result["assumptions"])
+
+    def test_partial_database_unsupported_year_and_invalid_ids(self):
+        partial = self.path.with_name("partial.db")
+        init_database(partial)
+        result = EmployeeRepository(partial).get_annual_payroll_summary("emp-001", 2026)
+        self.assertEqual(result["status"], "incomplete_annual_records")
+        self.assertNotIn("box_candidates_cents", result)
+        self.assertEqual(self.repository.get_annual_payroll_summary("emp-001", 2025)["status"], "incomplete_annual_records")
+        self.assertEqual(self.repository.get_annual_payroll_summary("missing", 2026)["status"], "not_found")
+        for bad_year in (True, "2026", 0):
+            with self.assertRaises(ValueError):
+                self.repository.get_annual_payroll_summary("emp-001", bad_year)
+
+    def test_missing_or_tampered_coverage_returns_no_amounts(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("UPDATE annual_payroll_coverage SET expected_payments_json = '[]' WHERE employee_id = 'emp-001'")
+            connection.commit()
+        result = self.repository.get_annual_payroll_summary("emp-001", 2026)
+        self.assertEqual(result["status"], "incomplete_annual_records")
+        self.assertNotIn("box_candidates_cents", result)
+
+
 class EmployeeRepositoryTests(unittest.TestCase):
+    def test_roster_pages_effective_salary_and_active_boundaries_without_writes(self):
+        before = self.path.read_bytes()
+        first = self.repository.list_employees("2026-10-19", limit=2)
+        self.assertEqual(first["match_count"], 4)
+        self.assertEqual([r["employee_number"] for r in first["employees"]], ["EMP-1001", "EMP-1002"])
+        self.assertEqual(first["employees"][1]["annual_salary_cents"], 7500000)
+        self.assertEqual(first["next_offset"], 2)
+        second = self.repository.list_employees("2026-10-19", limit=2, offset=2)
+        self.assertEqual([r["employee_number"] for r in second["employees"]], ["EMP-1003", "EMP-1004"])
+        self.assertFalse(second["has_more"])
+        self.assertIsNone(second["next_offset"])
+        self.assertEqual(self.repository.list_employees("2026-11-01")["employees"][1]["annual_salary_cents"], 8000000)
+        self.assertEqual(self.repository.list_employees("2026-10-15")["match_count"], 5)
+        self.assertEqual(self.repository.list_employees("2026-10-16")["match_count"], 4)
+        empty = self.repository.list_employees("2026-10-19", offset=100)
+        self.assertEqual(empty["employees"], [])
+        self.assertEqual(empty["match_count"], 4)
+        self.assertEqual(self.repository.list_employees("2027-01-01")["status"], "outside_snapshot")
+        for kwargs in ({"limit": True}, {"limit": 101}, {"offset": -1}):
+            with self.assertRaises(ValueError):
+                self.repository.list_employees("2026-10-19", **kwargs)
+        self.assertEqual(before, self.path.read_bytes())
+    def test_workforce_effective_dates_filters_and_distinct_counts(self):
+        before = self.path.read_bytes()
+        summary = self.repository.get_workforce_summary("2026-11-01")
+        self.assertEqual(summary["employee_count"], 4)
+        self.assertEqual(summary["total_employee_records"], 5)
+        self.assertEqual({g["frequency"]: g["employee_count"] for g in summary["pay_frequency_counts"]}, {"biweekly": 2, "monthly": 2})
+        self.assertEqual(self.repository.get_workforce_summary("2026-10-15")["employee_count"], 5)
+        self.assertEqual(self.repository.get_workforce_summary("2026-10-16")["employee_count"], 4)
+        for comparison, minimum, maximum, count in (("gt", 6000000, None, 2), ("gte", 6000000, None, 3),
+                                                     ("lt", None, 6000000, 1), ("lte", None, 6000000, 2),
+                                                     ("between", 5000000, 6500000, 3)):
+            result = self.repository.get_workforce_summary("2026-11-01", salary_comparison=comparison,
+                                                         salary_min_cents=minimum, salary_max_cents=maximum)
+            self.assertEqual(result["employee_count"], count)
+        self.assertEqual(self.repository.get_workforce_summary("2026-10-31", salary_comparison="gt", salary_min_cents=7500000)["employee_count"], 0)
+        self.assertEqual(self.repository.get_workforce_summary("2026-11-01", "monthly", "gt", 6000000)["employee_count"], 1)
+        self.assertEqual(self.repository.get_workforce_summary("2026-11-02")["status"], "outside_snapshot")
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_workforce_invalid_filters_do_not_become_unfiltered_queries(self):
+        for args in ({"salary_min_cents": 1}, {"salary_comparison": "gt"}, {"pay_frequency": "x' OR 1=1--"},
+                     {"salary_comparison": "gt", "salary_min_cents": True}, {"salary_comparison": "lt", "salary_max_cents": 1.5},
+                     {"salary_comparison": "between", "salary_min_cents": 200, "salary_max_cents": 100}):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                self.repository.get_workforce_summary("2026-11-01", **args)
+        with self.assertRaises(ValueError):
+            self.repository.get_workforce_summary("2026-02-30")
+
+    def test_movements_use_inclusive_first_inactive_dates(self):
+        self.assertEqual(self.repository.get_employment_movements("2026-01-01", "2026-01-01")["joined_employee_count"], 5)
+        self.assertEqual(self.repository.get_employment_movements("2026-10-15", "2026-10-15")["ended_employee_count"], 0)
+        self.assertEqual(self.repository.get_employment_movements("2026-10-16", "2026-10-16")["ended_employee_count"], 1)
+        self.assertEqual(self.repository.get_employment_movements("2026-11-01", "2026-11-02")["status"], "outside_snapshot")
+        with self.assertRaises(ValueError):
+            self.repository.get_employment_movements("2026-11-01", "2026-01-01")
+
+    def test_rehires_are_distinct_people_and_missing_filter_data_is_not_zero(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("INSERT INTO employments VALUES (?, ?, ?, ?, ?, ?)",
+                               ("rehire-sam", "emp-005", "2026-11-01", None, "ON", "CAD"))
+            connection.commit()
+        movements = self.repository.get_employment_movements("2026-01-01", "2026-11-01")
+        self.assertEqual(movements["joined_employee_count"], 5)
+        self.assertEqual(movements["join_event_count"], 6)
+        result = self.repository.get_workforce_summary("2026-11-01")
+        self.assertEqual(result["employee_count"], 5)
+        self.assertEqual(result["missing_salary_count"], 1)
+        roster = self.repository.list_employees("2026-11-01")
+        self.assertEqual(roster["match_count"], 5)
+        sam = next(row for row in roster["employees"] if row["employee_id"] == "emp-005")
+        self.assertIsNone(sam["annual_salary_cents"])
+        self.assertIsNone(sam["frequency"])
+        self.assertIn({"frequency": "unknown", "employee_count": 1}, result["pay_frequency_counts"])
+        for args in ({"salary_comparison": "gt", "salary_min_cents": 0}, {"pay_frequency": "monthly"}):
+            filtered = self.repository.get_workforce_summary("2026-11-01", **args)
+            self.assertEqual(filtered["status"], "data_gap")
+            self.assertIsNone(filtered["employee_count"])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

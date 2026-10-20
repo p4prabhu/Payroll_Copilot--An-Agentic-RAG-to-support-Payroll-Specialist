@@ -87,6 +87,69 @@ def build_model_agent(model, retriever, **kwargs):
 
 
 class PayrollAgentTests(unittest.TestCase):
+    def test_sample_t4_capability_does_not_change_document_guidance_route(self):
+        from payroll_agent import system_prompt
+        from t4_workflow import should_route
+        self.assertFalse(should_route("What information is needed to prepare Alex Morgan's T4 for 2026?", {}))
+        self.assertFalse(should_route("What is T4?", {}))
+        self.assertTrue(should_route("Show Alex Morgan’s sample T4 breakdown for 2026", {}))
+        self.assertIn("separate T4 workflow", system_prompt({"t4_sample_breakdown": True}))
+
+    def test_explicit_t4_reporting_year_is_not_a_payment_date_or_edition_year(self):
+        from payroll_agent import t4_reporting_year, turn_input
+        question = "What information would be needed to prepare Alex Morgan’s T4 for 2026"
+        self.assertEqual(t4_reporting_year(question), 2026)
+        self.assertEqual(t4_reporting_year("What do I need for Alex's 2026 T4?"), 2026)
+        state = turn_input(question)
+        self.assertEqual(state["reporting_year"], 2026)
+        self.assertIsNone(state["payment_date"])
+        for ambiguous in ("What information is needed for Alex's T4?", "What does the 2025 edition of the T4 guide say?",
+                          "What information is needed for T4 for 2025 and 2026?", "Generate Alex's T4 for 2026."):
+            self.assertIsNone(t4_reporting_year(ambiguous))
+
+    def test_exact_t4_requirements_question_repairs_format_without_requiring_paycheck_date(self):
+        question = "What information would be needed to prepare Alex Morgan’s T4 for 2026"
+        saved = evidence()
+        saved["results"][0]["content"] = "T4 preparation requires employee identification and complete annual employment income, CPP/EI contributions and income tax deducted."
+        text = ("To prepare Alex Morgan's T4 for 2026, collect complete calendar-year payroll records, employee identifiers, "
+                "employment income and taxable benefits, CPP and EI contributions, and income tax withheld in 2026. "
+                "These are required inputs, not verified totals for Alex. Partial payroll history cannot establish annual T4 amounts. [S1]")
+        model = FakeModel([call(), call(2), AIMessage(content=text), final("answer", text, ["S1"])])
+        state = run_turn(build_model_agent(model, Mock(return_value=saved)), question)
+        self.assertEqual(state["outcome"]["status"], "answer")
+        self.assertEqual(state["reporting_year"], 2026)
+        self.assertIsNone(state["payment_date"])
+        self.assertEqual(state["searches"], 2)
+        self.assertEqual(state["model_calls"], 4)
+        self.assertEqual(state["correction_attempts"], 1)
+        self.assertEqual(state["trace"][-1]["status"], "accepted")
+        self.assertIn("USER-REQUESTED T4 REPORTING YEAR: 2026", model.seen[0][0].content)
+        self.assertIn("without a paycheck date", model.seen[-1][-1].content)
+
+    def test_t4_context_does_not_enable_rate_selection_partial_ytd_or_different_year(self):
+        self.assertIsNone(year_selection_violation("Collect complete calendar-year income tax withheld in 2026 for the T4.", None, reporting_year=2026))
+        for text in ("Use the applicable 2026 Ontario deduction tables.",
+                     "How much income tax was withheld for 2025?",
+                     "Provide YTD contributions so far in 2026.",
+                     "How much was withheld for the next pay period in 2026?"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(year_selection_violation(text, None, reporting_year=2026))
+        self.assertIsNotNone(year_selection_violation("Collect income tax withheld in 2026.", None))
+
+    def test_t4_checklist_context_preserves_source_coverage_citations_and_amount_guards(self):
+        question = "What information is needed to prepare Alex Morgan's T4 for 2026?"
+        bad_answers = [
+            ("The 2025 guide covers the 2026 reporting year. [S1]", ["S1"], "Publication reporting-year coverage"),
+            ("Alex's T4 employment income is $50,000. [S1]", ["S1"], "New currency amounts"),
+            ("Collect complete calendar-year tax withheld in 2026.", [], "Answer lacks retrieved evidence"),
+            ("Collect annual employee records. [S99]", ["S99"], "Invalid citation"),
+        ]
+        for text, citations, expected in bad_answers:
+            with self.subTest(text=text):
+                invalid = final("answer", text, citations)
+                state = run_turn(build_model_agent(FakeModel([call(), invalid, invalid]), Mock(return_value=evidence())), question)
+                self.assertEqual(state["outcome"]["status"], "unsupported")
+                self.assertIn(expected, state["trace"][-1]["reason"])
     def test_document_only_graph_keeps_employee_capabilities_disabled(self):
         model = FakeModel([])
         state = run_turn(build_agent(model), "When is Alex's next payday?")
@@ -734,6 +797,45 @@ class PayrollAgentTests(unittest.TestCase):
         self.assertIn("Do not include any derived gross pay per period", feedback)
         self.assertEqual(state["trace"][-1]["status"], "accepted")
 
+    def test_t4_definition_repairs_format_and_currency_content_together(self):
+        saved = evidence()
+        saved["results"][0]["content"] = "A T4 slip reports employment income and amounts deducted during the year."
+        clean = "A T4 slip summarizes employment income and deductions for the year. It is used when preparing an income tax return. [S1]"
+        model = FakeModel([call(), AIMessage(content="A T4 reports employment income; for example $50,000. [S1]"),
+                           final("answer", clean, ["S1"])])
+        retriever = Mock(return_value=saved)
+        state = run_turn(build_model_agent(model, retriever), "what is t4")
+        self.assertEqual(state["outcome"]["status"], "answer")
+        self.assertIn(clean, state["outcome"]["text"])
+        self.assertEqual(state["correction_attempts"], 1)
+        self.assertEqual(state["model_calls"], 3)
+        self.assertEqual(state["searches"], 1)
+        rejection = next(event for event in state["trace"] if event.get("status") == "rejected")
+        self.assertEqual(rejection["reason"], "A single submit_response tool call is required")
+        self.assertIn("New currency amounts", rejection["additional_reason"])
+        feedback = model.seen[-1][-1].content
+        self.assertIn("Also correct this content issue", feedback)
+        self.assertIn("introduce NO other currency figures", feedback)
+        self.assertIn("reporting thresholds", model.seen[0][0].content)
+        self.assertNotIn("$50,000", json.dumps(state["trace"]))
+
+    def test_t4_definition_correction_cannot_introduce_currency_examples(self):
+        model = FakeModel([call(), AIMessage(content="A T4 reports employment income and deductions."),
+                           final("answer", "A T4 reports employment income, such as $50,000. [S1]", ["S1"])])
+        state = run_turn(build_model_agent(model, Mock(return_value=evidence())), "what is t4")
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+        self.assertIn("New currency amounts", state["trace"][-1]["reason"])
+        self.assertEqual(state["correction_attempts"], 1)
+        self.assertEqual(state["model_calls"], 3)
+        self.assertIn("introduce NO other currency figures", model.seen[-1][-1].content)
+
+    def test_t4_definition_can_answer_without_a_payment_date_or_repair(self):
+        model = FakeModel([call(), final("answer", "A T4 slip reports employment income and deductions for the year. [S1]", ["S1"])])
+        state = run_turn(build_model_agent(model, Mock(return_value=evidence())), "What is T4?")
+        self.assertEqual(state["outcome"]["status"], "answer")
+        self.assertIsNone(state["payment_date"])
+        self.assertEqual(state["correction_attempts"], 0)
+
     def test_payroll_estimate_cannot_bypass_correction_limit(self):
         invalid = final("clarification", "Gross pay per period: $1,923.08. What TD1 details?")
         state = run_turn(build_model_agent(FakeModel([invalid, invalid]), Mock()), "Biweekly $50,000 salary.")
@@ -981,6 +1083,40 @@ class PayrollAgentTests(unittest.TestCase):
 
 
 class DeterministicWorkflowTests(unittest.TestCase):
+    def test_enabled_calculation_node_confirms_before_calling_engine(self):
+        payload = json.loads((Path(__file__).parent / "fixtures/payroll_reference_cases.json").read_text(encoding="utf-8"))["cases"][0]["input"]
+        model, retriever = FakeModel([]), Mock()
+        graph = build_agent(model, retriever, enable_calculation=True)
+        ready = run_turn(graph, "Calculate payroll: " + json.dumps(payload))
+        self.assertTrue(ready["capabilities"]["payroll_calculation"])
+        self.assertNotIn("calculation", ready["outcome"])
+        from payroll_agent import turn_input
+        calculated = graph.invoke(turn_input("Confirm calculation", employee_session=ready["employee_session"]))
+        self.assertEqual(calculated["outcome"]["calculation"]["amounts"]["net_pay"], "1544.03")
+        self.assertIn("rules SHA-256", render_answer(calculated["outcome"]))
+        self.assertEqual(calculated["model_calls"], 0)
+        retriever.assert_not_called()
+        self.assertEqual(model.seen, [])
+
+    def test_enabled_calculation_does_not_allow_model_generated_payroll_amounts(self):
+        model = FakeModel([call(), final("answer", "Your net pay is $1544.03 [S1].", ["S1"]),
+                           final("answer", "Your net pay is $1544.03 [S1].", ["S1"])])
+        state = run_turn(build_agent(model, Mock(return_value=evidence()), enable_calculation=True),
+                         "Explain general payroll guidance.")
+        self.assertEqual(state["outcome"]["status"], "unsupported")
+
+    def test_guidance_interruption_invalidates_pending_calculation_confirmation(self):
+        from payroll_agent import turn_input
+        payload = json.loads((Path(__file__).parent / "fixtures/payroll_reference_cases.json").read_text(encoding="utf-8"))["cases"][0]["input"]
+        model = FakeModel([call(), final("answer", "Box 22 reports income tax deducted. [S1]", ["S1"])])
+        graph = build_agent(model, Mock(return_value=evidence()), enable_calculation=True)
+        ready = graph.invoke(turn_input("Calculate payroll: " + json.dumps(payload)))
+        guidance = graph.invoke(turn_input("What does T4 box 22 mean?", employee_session=ready["employee_session"]))
+        self.assertEqual(guidance["outcome"]["status"], "answer")
+        self.assertNotIn("awaiting_confirmation", guidance["employee_session"]["_calculation"])
+        confirmation = graph.invoke(turn_input("Confirm calculation", employee_session=guidance["employee_session"]))
+        self.assertNotIn("calculation", confirmation["outcome"])
+
     def test_new_money_amounts_are_rejected_in_document_answers_and_json_repairs(self):
         for money in ("your gross per pay period is approximately $1,923",
                       "your paycheck would be 1,923 CAD", "the amount is 1923 dollars"):
